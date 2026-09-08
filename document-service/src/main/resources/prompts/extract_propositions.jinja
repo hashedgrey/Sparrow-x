@@ -1,0 +1,71 @@
+{% include "dice/extract_propositions.jinja" %}
+
+STRICT OUTPUT CONTRACT
+
+Return exactly one JSON object:
+
+{
+"propositions": [
+{
+"text": "...",
+"confidence": 0.0,
+"importance": 0.0,
+"decay": 0.0,
+"source": "...",
+"reasoning": "...",
+"grounding": ["..."],
+"mentions": [
+{
+"span": "...",
+"type": "PascalCaseIdentifier",
+"role": "..."
+}
+]
+}
+]
+}
+
+Rules:
+
+- The top-level value MUST be a JSON object.
+- NEVER return a top-level array.
+- The top-level object MUST contain "propositions".
+- "propositions" MUST always be an array.
+- If there are no propositions, return:
+{"propositions":[]}
+- Do not use markdown.
+- Do not use code fences.
+- Do not add text before or after the JSON.
+- Ensure every opened object and array is correctly closed.
+- Prefer concise, non-duplicative, source-grounded factual propositions.
+
+ENTITY TYPE CONTRACT
+
+Every entity mention "type" MUST be a Neo4j-safe identifier.
+
+- Use PascalCase.
+- NEVER use spaces.
+- NEVER use hyphens.
+- NEVER use punctuation.
+- Only use ASCII letters and digits.
+- The first character MUST be a letter.
+- Keep entity types concise and singular.
+
+Examples:
+
+GOOD:
+ProgrammingPattern
+SoftwareDefect
+ConcurrencyIssue
+CriticalSection
+Class
+Method
+Variable
+Service
+
+BAD:
+Programming Pattern
+Software Defect
+Concurrency Issue
+programming-pattern
+Java Class

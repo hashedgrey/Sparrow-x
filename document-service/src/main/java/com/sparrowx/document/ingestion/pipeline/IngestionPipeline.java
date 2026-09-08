@@ -6,10 +6,13 @@ import com.sparrowx.document.data.postgres.repositories.DocumentChunkRepository;
 import com.sparrowx.document.domain.valueobjects.*;
 import com.sparrowx.document.exceptions.InvalidDocumentException;
 import com.sparrowx.document.ingestion.chunking.DocumentChunkDraft;
+import com.sparrowx.document.ingestion.embabel.DiceDocumentEnricher;
 import com.sparrowx.document.ingestion.embabel.EmbabelRagIngestionAdapter;
 import com.sparrowx.document.ingestion.indexing.DocumentChunkIndexRequest;
 import com.sparrowx.document.ingestion.indexing.DocumentChunkIndexResult;
 import com.sparrowx.document.ingestion.indexing.DocumentChunkIndexer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -24,15 +27,22 @@ public class IngestionPipeline {
     private final EmbabelRagIngestionAdapter embabelRagIngestionAdapter;
     private final DocumentChunkRepository documentChunkRepository;
     private final DocumentChunkIndexer documentChunkIndexer;
+    private final DiceDocumentEnricher diceDocumentEnricher;
+    private static final Logger logger =
+            LoggerFactory.getLogger(
+                    IngestionPipeline.class
+            );
 
     public IngestionPipeline(
             DocumentStorage documentStorage,
             EmbabelRagIngestionAdapter embabelRagIngestionAdapter,
+            DiceDocumentEnricher diceDocumentEnricher,
             DocumentChunkRepository documentChunkRepository,
             DocumentChunkIndexer documentChunkIndexer
     ) {
         this.documentStorage = documentStorage;
         this.embabelRagIngestionAdapter = embabelRagIngestionAdapter;
+        this.diceDocumentEnricher = diceDocumentEnricher;
         this.documentChunkRepository = documentChunkRepository;
         this.documentChunkIndexer = documentChunkIndexer;
     }
@@ -63,12 +73,34 @@ public class IngestionPipeline {
          */
         completedSteps.add(IngestionPipelineStep.EXTRACT_TEXT);
         completedSteps.add(IngestionPipelineStep.CHUNK_TEXT);
+        /*
+         * Semantic enrichment is synchronous with the ingestion job.
+         *
+         * A document cannot reach the persistence/index completion path if
+         * proposition extraction or graph persistence fails.
+         *
+         * No query-time path calls DiceDocumentEnricher.
+         */
+        DiceDocumentEnricher.DiceEnrichmentResult diceEnrichment =
+                diceDocumentEnricher.enrich(
+                        request.tenantId().value(),
+                        request.documentId(),
+                        request.fileName(),
+                        ingestion.embabelChunks()
+                );
 
         List<DocumentChunkDraft> chunkDrafts = ingestion.chunks();
 
         List<DocumentChunkEntity> chunkEntities = chunkDrafts.stream()
                 .map(chunkDraft -> toEntity(request, chunkDraft))
                 .toList();
+
+        logger.info(
+                "DICE enrichment complete documentId={} propositions={} relationships={}",
+                request.documentId().value(),
+                diceEnrichment.propositionCount(),
+                diceEnrichment.relationshipCount()
+        );
 
         documentChunkRepository.saveAll(chunkEntities);
         completedSteps.add(IngestionPipelineStep.PERSIST_CHUNKS);

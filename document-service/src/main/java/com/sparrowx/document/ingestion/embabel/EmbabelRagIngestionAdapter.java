@@ -50,22 +50,10 @@ public class EmbabelRagIngestionAdapter {
             MimeType mimeType,
             byte[] content
     ) {
-        Objects.requireNonNull(
-                documentId,
-                "documentId must not be null"
-        );
-        Objects.requireNonNull(
-                objectKey,
-                "objectKey must not be null"
-        );
-        Objects.requireNonNull(
-                fileName,
-                "fileName must not be null"
-        );
-        Objects.requireNonNull(
-                mimeType,
-                "mimeType must not be null"
-        );
+        Objects.requireNonNull(documentId, "documentId must not be null");
+        Objects.requireNonNull(objectKey, "objectKey must not be null");
+        Objects.requireNonNull(fileName, "fileName must not be null");
+        Objects.requireNonNull(mimeType, "mimeType must not be null");
 
         if (content == null || content.length == 0) {
             throw InvalidDocumentException.emptyContent();
@@ -82,25 +70,13 @@ public class EmbabelRagIngestionAdapter {
 
         failOnParseError(document, fileName);
 
-        Map<String, Object> sparrowMetadata =
-                new LinkedHashMap<>();
+        Map<String, Object> sparrowMetadata = new LinkedHashMap<>();
 
-        sparrowMetadata.put(
-                "sparrowx_document_id",
-                documentId.value()
+        sparrowMetadata.put("sparrowx_document_id", documentId.value());
+        sparrowMetadata.put("sparrowx_object_key", objectKey.value());
+        sparrowMetadata.put("sparrowx_file_name", fileName.value()
         );
-        sparrowMetadata.put(
-                "sparrowx_object_key",
-                objectKey.value()
-        );
-        sparrowMetadata.put(
-                "sparrowx_file_name",
-                fileName.value()
-        );
-        sparrowMetadata.put(
-                "sparrowx_mime_type",
-                mimeType.value()
-        );
+        sparrowMetadata.put("sparrowx_mime_type", mimeType.value());
 
         document = document.withMetadata(
                 sparrowMetadata
@@ -112,16 +88,21 @@ public class EmbabelRagIngestionAdapter {
                         mimeType
                 );
 
+        Map<String, Object> documentMetadata = document.getMetadata();
+
+        List<Chunk> enrichedChunks = embabelChunks.stream().map(chunk ->
+                                chunk.withAdditionalMetadata(documentMetadata)).toList();
+
         List<DocumentChunkDraft> chunkDrafts =
                 toChunkDrafts(
                         documentId,
-                        document,
-                        embabelChunks
+                        enrichedChunks
                 );
 
         return new EmbabelRagIngestionResult(
                 extractText(document),
                 resolvePageCount(document.getMetadata()),
+                enrichedChunks,
                 chunkDrafts
         );
     }
@@ -227,7 +208,6 @@ public class EmbabelRagIngestionAdapter {
 
     private List<DocumentChunkDraft> toChunkDrafts(
             DocumentId documentId,
-            NavigableDocument document,
             List<Chunk> embabelChunks
     ) {
         List<DocumentChunkDraft> chunkDrafts =
@@ -244,10 +224,7 @@ public class EmbabelRagIngestionAdapter {
              * ContentChunker directly, so reproduce only that neutral
              * metadata behavior here.
              */
-            Chunk chunk =
-                    originalChunk.withAdditionalMetadata(
-                            document.getMetadata()
-                    );
+            Chunk chunk = originalChunk;
 
             Map<String, String> metadata =
                     toStringMetadata(
@@ -397,8 +374,7 @@ public class EmbabelRagIngestionAdapter {
         }
 
         try {
-            return Integer.parseInt(
-                    value.toString().trim()
+            return Integer.parseInt(value.toString().trim()
             );
         } catch (NumberFormatException ignored) {
             return fallback;
@@ -426,25 +402,14 @@ public class EmbabelRagIngestionAdapter {
     public record EmbabelRagIngestionResult(
             String extractedText,
             int pageCount,
+            List<Chunk> embabelChunks,
             List<DocumentChunkDraft> chunks
     ) {
-
         public EmbabelRagIngestionResult {
-            extractedText =
-                    extractedText == null
-                            ? ""
-                            : extractedText;
-
-            pageCount =
-                    Math.max(
-                            1,
-                            pageCount
-                    );
-
-            chunks =
-                    chunks == null
-                            ? List.of()
-                            : List.copyOf(chunks);
+            extractedText = extractedText == null ? "" : extractedText;
+            pageCount = Math.max(1, pageCount);
+            embabelChunks = embabelChunks == null ? List.of() : List.copyOf(embabelChunks);
+            chunks = chunks == null ? List.of() : List.copyOf(chunks);
         }
     }
 }
