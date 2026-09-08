@@ -1,0 +1,210 @@
+D:\Projects\Sparrow-x\document-service\src\main\java
+└── com
+    └── sparrowx
+        └── document
+            ├── DocumentApplication.java                         // Boots the Document Service Spring application.
+            ├── config
+            │   ├── DataConfig.java                             // Wires PostgreSQL/JPA repositories and the primary SparrowX transaction manager.
+            │   ├── DocumentServiceConfiguration.java            // Central service-level Spring configuration.
+            │   ├── ElasticsearchClientConfig.java               // Creates the Elasticsearch client used for keyword indexing and retrieval.
+            │   ├── ElasticsearchConfig.java                     // Holds Elasticsearch-specific service configuration.
+            │   ├── EmbeddingConfig.java                         // Configures SparrowX retrieval embedding behavior.
+            │   ├── JacksonConfig.java                           // Configures JSON serialization used across the service.
+            │   ├── MinioClientConfig.java                       // Creates the MinIO client for original document storage.
+            │   ├── MinioConfig.java                             // Holds MinIO connection and bucket configuration.
+            │   ├── QdrantConfig.java                            // Creates Qdrant client infrastructure.
+            │   ├── QdrantProperties.java                        // Defines Qdrant endpoint, collection, and vector settings.
+            │   └── SecurityConfig.java                          // Configures service security and request authorization.
+            ├── data
+            │   ├── DocumentPersistenceMapper.java               // Maps domain documents and ingestion jobs to persistence entities.
+            │   ├── elasticsearch
+            │   │   ├── ElasticsearchChunkIndexer.java           // Writes document chunks into Elasticsearch.
+            │   │   └── ElasticsearchDocumentKeywordRepository.java // Performs lexical document retrieval from Elasticsearch.
+            │   ├── minio
+            │   │   ├── DocumentStorage.java                     // Abstraction for storing and loading original document objects.
+            │   │   ├── MinioDocumentStorage.java                // MinIO implementation of document object storage.
+            │   │   ├── MinioObjectMetadata.java
+            │   │   └── StoredDocumentObject.java
+            │   ├── postgres
+            │   │   ├── entities
+            │   │   │   ├── DocumentChunkEntity.java             // PostgreSQL representation of an ingested document chunk.
+            │   │   │   ├── DocumentEntity.java                  // PostgreSQL representation of document metadata and lifecycle state.
+            │   │   │   └── IngestionJobEntity.java              // Persists ingestion progress so jobs can recover after restart.
+            │   │   └── repositories
+            │   │       ├── DocumentChunkRepository.java          // Persists and loads document chunks.
+            │   │       ├── DocumentRepository.java               // Persists and queries document metadata.
+            │   │       └── IngestionJobRepository.java           // Persists and recovers ingestion jobs.
+            │   └── qdrant
+            │       ├── QdrantChunkIndexer.java                   // Writes chunk vectors and metadata into Qdrant.
+            │       ├── QdrantCollectionInitializer.java          // Ensures the required Qdrant collection exists at startup.
+            │       └── QdrantDocumentVectorRepository.java       // Performs tenant/document-scoped semantic vector search.
+            ├── domain
+            │   ├── events
+            │   │   ├── DocumentChunkedDomainEvent.java
+            │   │   ├── DocumentEmbeddedDomainEvent.java
+            │   │   ├── DocumentIndexedDomainEvent.java
+            │   │   ├── DocumentParsedDomainEvent.java
+            │   │   ├── DocumentSearchedDomainEvent.java
+            │   │   └── DocumentUploadedDomainEvent.java
+            │   ├── models
+            │   │   ├── Document.java                            // Core aggregate representing an uploaded document and its lifecycle.
+            │   │   ├── DocumentEvidenceEdge.java                // Represents a grounded semantic relationship in an evidence graph.
+            │   │   ├── DocumentEvidenceGraph.java               // Container for evidence nodes, relationships, provenance, and verification state.
+            │   │   ├── DocumentEvidenceNode.java                // Represents a claim, entity, or other grounded evidence node.
+            │   │   ├── IngestionJob.java                        // Domain model for resumable document processing work.
+            │   │   ├── RetrievalEvidence.java                   // Bundles retrieved source material before evidence graph construction.
+            │   │   └── SourceSpan.java                          // Grounding unit linking retrieved text back to document/chunk/page provenance.
+            │   └── valueobjects
+            │       ├── CallerService.java
+            │       ├── ChunkId.java
+            │       ├── ClaimText.java
+            │       ├── ContentHash.java
+            │       ├── DocumentId.java
+            │       ├── DocumentStatus.java
+            │       ├── DocumentTitle.java
+            │       ├── FileName.java
+            │       ├── IngestionJobId.java
+            │       ├── IngestionStatus.java
+            │       ├── MimeType.java
+            │       ├── ObjectKey.java
+            │       ├── ProjectId.java
+            │       ├── RequestId.java
+            │       ├── RetrievalMode.java
+            │       ├── SearchQueryText.java
+            │       ├── TeamId.java
+            │       ├── TenantId.java
+            │       ├── TraceId.java
+            │       ├── UserId.java
+            │       └── VerificationStatus.java
+            ├── evidencegraph
+            │   ├── DocumentEvidenceRuntime.java                 // Runtime facade used to build and verify document evidence.
+            │   ├── EvidenceBuildOrchestrator.java               // Coordinates retrieval, DICE semantic hydration, fallback normalization, and graph assembly.
+            │   ├── EvidenceGraphBuilder.java                    // Constructs the final DocumentEvidenceGraph from normalized nodes and edges.
+            │   ├── EvidenceGraphPolicy.java                     // Applies graph-level evidence constraints and safety rules.
+            │   ├── EvidenceGraphResponseCompactor.java          // Reduces evidence graph payload size without losing required provenance.
+            │   ├── EvidenceNormalizer.java                      // Fallback path that derives grounded evidence nodes directly from SourceSpans.
+            │   ├── EvidenceRelationLinker.java                  // Fallback linker for grounded relations when DICE semantic edges are unavailable.
+            │   ├── EvidenceSchemaValidator.java                 // Validates graph nodes and relations against the requested evidence schema.
+            │   └── dice
+            │       ├── DiceEvidenceMapper.java                  // Maps persisted DICE propositions/entities/projection lineage into SparrowX evidence nodes and edges.
+            │       ├── DiceEvidenceProjectionService.java       // Defines the DICE-backed semantic evidence projection contract.
+            │       └── DiceEvidenceRetriever.java               // Bridges retrieved chunk IDs to persisted DICE propositions and Neo4j projection lineage.
+            ├── exceptions
+            │   ├── CitationVerificationException.java
+            │   ├── DocumentAccessDeniedException.java
+            │   ├── DocumentErrorCodes.java                      // Central catalog of Document Service error codes.
+            │   ├── DocumentExtractionException.java
+            │   ├── DocumentIndexingException.java
+            │   ├── DocumentNotFoundException.java
+            │   ├── DocumentServiceException.java                // Base exception for Document Service failures.
+            │   ├── IngestionJobNotFoundException.java
+            │   ├── InvalidDocumentException.java
+            │   ├── RetrievalFailedException.java
+            │   └── UnsupportedDocumentTypeException.java
+            ├── features
+            │   ├── builddocumentevidence
+            │   │   ├── BuildDocumentEvidenceCommand.java        // Input contract for scoped evidence construction.
+            │   │   ├── BuildDocumentEvidenceCommandHandler.java // Entry point that invokes the evidence-building runtime.
+            │   │   └── BuildDocumentEvidenceResult.java         // Returns the constructed graph plus retrieval/coverage metadata.
+            │   ├── getdocument
+            │   │   ├── GetDocumentQuery.java
+            │   │   ├── GetDocumentQueryHandler.java             // Loads one tenant-scoped document and maps it to the API result.
+            │   │   └── GetDocumentResult.java
+            │   ├── getingestionjob
+            │   │   ├── GetIngestionJobQuery.java
+            │   │   ├── GetIngestionJobQueryHandler.java         // Returns persisted ingestion progress and terminal status.
+            │   │   └── GetIngestionJobResult.java
+            │   ├── processingestionjob
+            │   │   ├── DocumentIndexedDomainEvent.java
+            │   │   ├── IngestionJobLifecycleService.java        // Commits start/complete/fail ingestion transitions in short independent JPA transactions.
+            │   │   ├── ProcessIngestionJobCommand.java
+            │   │   ├── ProcessIngestionJobCommandHandler.java   // Runs the full long-lived ingestion pipeline outside one database transaction.
+            │   │   └── ProcessIngestionJobResult.java
+            │   ├── searchdocumentspans
+            │   │   ├── SearchDocumentSpansQuery.java            // Defines a scoped hybrid retrieval request.
+            │   │   ├── SearchDocumentSpansQueryHandler.java     // Executes retrieval and returns grounded SourceSpans.
+            │   │   └── SearchDocumentSpansResult.java
+            │   ├── uploaddocument
+            │   │   ├── DocumentUploadedDomainEvent.java
+            │   │   ├── UploadDocumentCommand.java               // Carries metadata and content required to register a new document.
+            │   │   ├── UploadDocumentCommandHandler.java        // Persists the document/object and creates the ingestion job.
+            │   │   ├── UploadDocumentCommandValidator.java      // Enforces upload invariants before persistence.
+            │   │   └── UploadDocumentResult.java
+            │   └── verifyevidencegraph
+            │       ├── VerifyEvidenceGraphQuery.java             // Supplies an evidence graph and source pool for deterministic verification.
+            │       ├── VerifyEvidenceGraphQueryHandler.java      // Checks whether graph claims and edges remain supported by cited sources.
+            │       └── VerifyEvidenceGraphResult.java            // Returns support status, confidence, coverage, and unsupported node/edge IDs.
+            ├── grpc
+            │   ├── DocumentServiceGrpcImpl.java                 // Maps public gRPC operations onto feature commands and queries.
+            │   ├── GrpcServerConfig.java                        // Configures the Document Service gRPC server.
+            │   ├── health
+            │   │   └── DocumentServiceStartupCheck.java         // Verifies required infrastructure is ready during application startup.
+            │   ├── interceptors
+            │   │   └── GrpcPolicyEnforcementInterceptor.java    // Enforces internal-call, tenant, user, and transport policies.
+            │   └── policies
+            │       └── DocumentResiliencePolicy.java            // Defines retry/error translation behavior at the service boundary.
+            ├── ingestion
+            │   ├── DocumentProcessingResult.java                // High-level outcome returned by document processing.
+            │   ├── DocumentProcessor.java                       // Coordinates document processing for an ingestion job.
+            │   ├── IngestionJobRecoveryService.java             // Finds unfinished persisted jobs after startup and reschedules them.
+            │   ├── IngestionJobRunner.java                      // Executes one queued ingestion job.
+            │   ├── IngestionWorker.java                         // Background worker consuming ingestion queue messages.
+            │   ├── IngestionWorkerProperties.java               // Configures worker polling and execution behavior.
+            │   ├── chunking
+            │   │   └── DocumentChunkDraft.java                  // SparrowX representation of an Embabel-produced chunk before persistence/indexing.
+            │   ├── embabel
+            │   │   ├── DiceDocumentEnricher.java                // Runs DICE extraction, resolution, persistence, and graph projection during ingestion.
+            │   │   ├── DiceGraphConfiguration.java              // Wires Neo4j/Drivine graph repositories and DICE's Embabel embedding service.
+            │   │   ├── DiceIngestionConfiguration.java          // Configures DICE propositions, entity resolution, relation vocabulary, and graph projection.
+            │   │   ├── EmbabelRagConfiguration.java             // Configures Embabel RAG parsing/chunking infrastructure.
+            │   │   ├── EmbabelRagIngestionAdapter.java          // Converts uploaded bytes into page-aware Embabel chunks and SparrowX chunk drafts.
+            │   │   └── PdfPageHierarchicalContentReader.java    // Preserves PDF page hierarchy while feeding content into Embabel RAG.
+            │   ├── indexing
+            │   │   ├── DeterministicEmbeddingService.java       // Non-provider embedding implementation used for deterministic/test scenarios.
+            │   │   ├── DocumentChunkIndexRequest.java
+            │   │   ├── DocumentChunkIndexResult.java
+            │   │   ├── DocumentChunkIndexer.java                // Abstraction for publishing persisted chunks to retrieval indexes.
+            │   │   ├── DualDocumentChunkIndexer.java            // Fans each chunk batch out to both Elasticsearch and Qdrant.
+            │   │   ├── ElasticsearchDocumentChunkIndexer.java   // Adapts SparrowX chunk indexing requests to Elasticsearch.
+            │   │   ├── EmbeddingService.java                    // Retrieval-specific contract separating document and query embedding intent.
+            │   │   ├── GeminiEmbeddingService.java              // Produces Gemini RETRIEVAL_DOCUMENT and RETRIEVAL_QUERY embeddings for Qdrant.
+            │   │   └── QdrantDocumentChunkIndexer.java          // Embeds chunk text and publishes vectors into Qdrant.
+            │   ├── pipeline
+            │   │   ├── IngestionPipeline.java                   // Executes parse/chunk → DICE enrich → persist → index as one recoverable workflow.
+            │   │   ├── IngestionPipelineResult.java             // Reports pages, chunks, indexing, and semantic-enrichment outcomes.
+            │   │   └── IngestionPipelineStep.java               // Names observable stages of ingestion processing.
+            │   └── queue
+            │       ├── InMemoryIngestionQueue.java              // Local queue implementation for ingestion work.
+            │       ├── IngestionQueue.java                      // Abstraction separating upload submission from worker execution.
+            │       └── IngestionQueueMessage.java               // Minimal message identifying the ingestion job to process.
+            ├── mappers
+            │   ├── DocumentMapper.java                          // Maps document domain objects to API/proto-facing models.
+            │   ├── EventMapperImpl.java                         // Maps domain events onto integration/event representations.
+            │   └── EvidenceGraphMapper.java                     // Maps internal evidence graphs to gRPC response structures.
+            ├── observability
+            │   ├── CitationVerificationLogger.java
+            │   ├── DocumentLifecycleLogger.java                 // Emits document creation/state transition diagnostics.
+            │   ├── EvidenceBuildLogger.java                     // Records evidence graph request, size, retrieval mode, and coverage.
+            │   ├── EvidenceGraphVerificationLogger.java         // Records verification support, confidence, and coverage outcomes.
+            │   ├── IngestionLifecycleLogger.java                // Tracks ingestion progression, failures, and completion.
+            │   └── RetrievalLifecycleLogger.java                // Tracks retrieval inputs, candidate counts, and result quality.
+            ├── retrieval
+            │   ├── ClaimCacheRetriever.java                     // Optional semantic claim-cache retrieval path; currently not persistence-backed.
+            │   ├── ContextAccessFilter.java                     // Applies project/team/context boundaries to retrieved candidates.
+            │   ├── DocumentMetadataLookup.java                  // Abstraction for loading metadata needed during retrieval filtering.
+            │   ├── DocumentReranker.java                        // Reorders merged candidates using retrieval relevance rules.
+            │   ├── DocumentScopeResolver.java                   // Resolves requested document IDs/names and rejects ambiguous scope.
+            │   ├── HybridDocumentRetriever.java                 // Orchestrates lexical + vector retrieval into one ranked result set.
+            │   ├── KeywordDocumentSearcher.java                 // Runs Elasticsearch lexical search.
+            │   ├── PostgresDocumentMetadataLookup.java          // PostgreSQL implementation of retrieval metadata lookup.
+            │   ├── RetrievalDeduplicator.java                   // Removes duplicate candidates from merged keyword/vector results.
+            │   ├── RetrievalEvidenceBuilder.java                // Converts filtered retrieval hits into grounded retrieval evidence.
+            │   ├── RetrievalPermissionFilter.java               // Removes candidates the caller is not authorized to access.
+            │   ├── RetrievalPolicy.java                         // Centralizes retrieval limits and acceptance rules.
+            │   ├── RetrievalScoreMerger.java                    // Combines lexical and vector scores into a unified ranking.
+            │   ├── SourceSpanBuilder.java                       // Builds provenance-rich SourceSpans from final retrieval hits.
+            │   └── VectorDocumentSearcher.java                  // Runs Qdrant semantic vector search.
+            └── verification
+                ├── CitationVerifier.java                        // Verifies citations point to valid registered SourceSpans.
+                ├── EvidenceGraphVerifier.java                   // Deterministically checks evidence nodes/edges against their grounding spans.
+                └── NumericComparisonEvaluator.java              // Handles deterministic numerical comparison during evidence verification.
