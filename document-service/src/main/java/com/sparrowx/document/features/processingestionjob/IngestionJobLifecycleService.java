@@ -33,7 +33,10 @@ public class IngestionJobLifecycleService {
         this.ingestionJobRepository = ingestionJobRepository;
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    @Transactional(
+            transactionManager = "transactionManager",
+            propagation = Propagation.REQUIRES_NEW
+    )
     public StartState start(
             TenantId tenantId,
             DocumentId documentId,
@@ -71,8 +74,10 @@ public class IngestionJobLifecycleService {
         );
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void complete(
+    @Transactional(
+            transactionManager = "transactionManager",
+            propagation = Propagation.REQUIRES_NEW
+    )    public void complete(
             TenantId tenantId,
             DocumentId documentId,
             IngestionJobId ingestionJobId,
@@ -99,8 +104,10 @@ public class IngestionJobLifecycleService {
         documentRepository.save(document);
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void fail(
+    @Transactional(
+            transactionManager = "transactionManager",
+            propagation = Propagation.REQUIRES_NEW
+    )    public void fail(
             TenantId tenantId,
             DocumentId documentId,
             IngestionJobId ingestionJobId,

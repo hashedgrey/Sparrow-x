@@ -26,6 +26,9 @@
         <tika.version>3.2.0</tika.version>
         <embabel-agent.version>1.5.0-SNAPSHOT</embabel-agent.version>
         <dice.version>0.2.0-SNAPSHOT</dice.version>
+        <embabel-rag-graph.version>0.3.0-SNAPSHOT</embabel-rag-graph.version>
+        <drivine.version>0.0.79</drivine.version>
+        <guava.version>33.6.0-jre</guava.version>
 
     </properties>
 
@@ -103,6 +106,58 @@
             <groupId>com.embabel.agent</groupId>
             <artifactId>embabel-agent-rag-tika</artifactId>
             <version>${embabel-agent.version}</version>
+        </dependency>
+
+        <!-- durable proposition + graph storage -->
+        <dependency>
+            <groupId>com.embabel.dice</groupId>
+            <artifactId>dice-storage</artifactId>
+            <version>${dice.version}</version>
+        </dependency>
+
+        <!-- Spring wiring for graph backend -->
+        <dependency>
+            <groupId>com.embabel.dice</groupId>
+            <artifactId>dice-storage-autoconfigure</artifactId>
+            <version>${dice.version}</version>
+        </dependency>
+
+        <!-- recommended: duplicate/retry-safe ingestion -->
+        <dependency>
+            <groupId>com.embabel.dice</groupId>
+            <artifactId>dice-ingestion</artifactId>
+            <version>${dice.version}</version>
+        </dependency>
+
+        <!-- Gives DICE an Embabel Ai backed by Google GenAI / Gemini -->
+        <dependency>
+            <groupId>com.embabel.agent</groupId>
+            <artifactId>embabel-agent-starter-google-genai</artifactId>
+            <version>${embabel-agent.version}</version>
+        </dependency>
+
+        <!-- Durable NamedEntityDataRepository + relationship graph -->
+        <dependency>
+            <groupId>com.embabel.agent</groupId>
+            <artifactId>embabel-agent-rag-graph</artifactId>
+            <version>${embabel-rag-graph.version}</version>
+        </dependency>
+
+        <!--
+            Explicitly align Drivine with DICE 0.2.0-SNAPSHOT.
+            rag-graph 0.3.0 was built against an earlier Drivine 0.0.x,
+            while current DICE storage uses 0.0.79.
+        -->
+        <dependency>
+            <groupId>org.drivine</groupId>
+            <artifactId>drivine4j-spring-boot-starter</artifactId>
+            <version>${drivine.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <version>${guava.version}</version>
         </dependency>
 
         <dependency>
