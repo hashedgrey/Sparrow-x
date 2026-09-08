@@ -2,7 +2,6 @@ package com.sparrowx.document.ingestion.indexing;
 
 import com.sparrowx.document.exceptions.DocumentIndexingException;
 import com.sparrowx.document.exceptions.InvalidDocumentException;
-import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
 
 import java.util.Objects;
