@@ -2,11 +2,7 @@ package com.sparrowx.document.mappers;
 
 import com.google.protobuf.Timestamp;
 import com.sparrowx.document.domain.models.Document;
-import com.sparrowx.document.domain.models.DocumentEvidenceEdge;
-import com.sparrowx.document.domain.models.DocumentEvidenceGraph;
-import com.sparrowx.document.domain.models.DocumentEvidenceNode;
 import com.sparrowx.document.domain.models.IngestionJob;
-import com.sparrowx.document.domain.models.SourceSpan;
 import com.sparrowx.document.domain.valueobjects.*;
 import com.sparrowx.document.features.builddocumentevidence.BuildDocumentEvidenceCommand;
 import com.sparrowx.document.features.builddocumentevidence.BuildDocumentEvidenceResult;
@@ -25,7 +21,6 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 
 @Component
 public class DocumentMapper {

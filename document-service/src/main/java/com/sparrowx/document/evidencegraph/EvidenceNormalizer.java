@@ -1,6 +1,5 @@
 package com.sparrowx.document.evidencegraph;
 
-import com.sparrowx.document.domain.models.DocumentEvidenceGraph;
 import com.sparrowx.document.domain.models.DocumentEvidenceNode;
 import com.sparrowx.document.domain.models.SourceSpan;
 import com.sparrowx.document.domain.valueobjects.VerificationStatus;
