@@ -8,21 +8,22 @@ import com.embabel.dice.common.EntityResolver;
 import com.embabel.dice.common.Relations;
 import com.embabel.dice.common.SchemaAdherence;
 import com.embabel.dice.common.resolver.EscalatingEntityResolver;
+import com.embabel.dice.pipeline.BatchedExtractionStrategy;
+import com.embabel.dice.pipeline.ExtractionExecutionStrategy;
 import com.embabel.dice.pipeline.PropositionPipeline;
-import com.embabel.dice.projection.graph.GraphProjectionService;
-import com.embabel.dice.projection.graph.GraphProjector;
-import com.embabel.dice.projection.graph.GraphRelationshipPersister;
-import com.embabel.dice.projection.graph.LlmGraphProjector;
-import com.embabel.dice.projection.graph.NamedEntityDataRepositoryGraphRelationshipPersister;
+import com.embabel.dice.projection.graph.*;
 import com.embabel.dice.projection.lineage.ProjectionRecordStore;
 import com.embabel.dice.projection.lineage.RepositoryBackedReconciler;
 import com.embabel.dice.proposition.PropositionRepository;
 import com.embabel.dice.proposition.extraction.LlmPropositionExtractor;
+import com.sparrowx.document.observability.ContextPropagatingExecutorService;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.Collections;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Configuration
 public class DiceIngestionConfiguration {
@@ -41,6 +42,26 @@ public class DiceIngestionConfiguration {
         );
     }
 
+    @Bean(
+            name = "diceExtractionExecutor",
+            destroyMethod = "shutdown"
+    )
+    public ExecutorService diceExtractionExecutor() {
+        return new ContextPropagatingExecutorService(
+                Executors.newFixedThreadPool(4)
+        );
+    }
+
+    @Bean(destroyMethod = "close")
+    public BatchedExtractionStrategy diceExtractionExecutionStrategy(
+            @Qualifier("diceExtractionExecutor")
+            ExecutorService diceExtractionExecutor
+    ) {
+        return new BatchedExtractionStrategy(
+                4,
+                diceExtractionExecutor
+        );
+    }
     @Bean
     public Relations diceRelations() {
         /*
@@ -91,38 +112,50 @@ public class DiceIngestionConfiguration {
 
     @Bean
     public PropositionPipeline dicePropositionPipeline(
-            LlmPropositionExtractor dicePropositionExtractor
+            LlmPropositionExtractor dicePropositionExtractor,
+            ExtractionExecutionStrategy diceExtractionExecutionStrategy
     ) {
-        return PropositionPipeline.withExtractor(
-                dicePropositionExtractor
-        );
+        return PropositionPipeline
+                .withExtractor(dicePropositionExtractor)
+                .withExecutionStrategy(
+                        diceExtractionExecutionStrategy
+                );
     }
 
+    @Bean(name = "diceGraphProjectionExecutor", destroyMethod = "shutdown")
+    public ExecutorService diceGraphProjectionExecutor() {
+        return new ContextPropagatingExecutorService(
+                Executors.newFixedThreadPool(4)
+        );
+    }
     @Bean
     public GraphProjector diceGraphProjector(
             Ai ai,
-            Relations diceRelations
+            Relations diceRelations,
+            @Qualifier("diceGraphProjectionExecutor")
+            ExecutorService diceGraphProjectionExecutor
     ) {
-        /*
-         * Second and final generative operation in document-service.
-         *
-         * Still ingestion-time only:
-         *
-         * Proposition
-         *      ↓
-         * classify relationship
-         *      ↓
-         * persisted semantic graph edge
-         */
-        return LlmGraphProjector
-                .withLlm(
-                        LlmOptions.withDefaultLlm()
-                )
-                .withAi(ai)
-                .withRelations(
-                        diceRelations
-                )
-                .withLenientPolicy();
+        GraphProjector deterministic =
+                RelationBasedGraphProjector
+                        .from(diceRelations)
+                        .withLenientPolicy();
+
+        GraphProjector llm =
+                LlmGraphProjector.withLlm(LlmOptions.withDefaultLlm()).withAi(ai)
+                        .withRelations(diceRelations)
+                        .withLenientPolicy();
+
+        GraphProjector boundedLlm =
+                new BoundedParallelGraphProjector(
+                        llm,
+                        diceGraphProjectionExecutor,
+                        4
+                );
+
+        return new HybridGraphProjector(
+                deterministic,
+                boundedLlm
+        );
     }
 
     @Bean
