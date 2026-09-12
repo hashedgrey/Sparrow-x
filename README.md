@@ -13,9 +13,6 @@ SparrowX is an internal knowledge and agentic search system for engineering orga
 It connects company documents, service ownership, onboarding workflows, runbooks,
 repositories and internal domain data into one searchable, explainable assistant.
 
-The goal is to make SparrowX behave like an internal engineering brain: A system that can:
-answer questions, find context, guide new engineers and reason across structured and
-unstructured company data.
 
 >Crucially, this brain is completely self-referential. Upon deployment,
 SparrowX indexes Agentic-Service's own codebase and system architecture into onboarding paths.  
@@ -28,7 +25,7 @@ SparrowX is built around three core services:
 
 * **agenticsvc** - The orchestration layer that receives user missions, parses intent, plans tool calls, invokes internal services, coordinates agent execution, and produces grounded answers.
 
-* **intsvc** - The structured internal system that stores teams, engineers, services, onboarding paths, tasks, ownership, service metadata, and internal business/domain entities.
+* **intsvc** - The structured internal system that stores teams, engineers, services, tasks, ownership, service metadata, and internal business/domain entities.
 
 * **docsvc** - The document intelligence layer that handles document upload, extraction, chunking, hybrid retrieval, vector search, keyword search, citation verification, and evidence graph construction.
 
@@ -39,60 +36,50 @@ SparrowX is built around three core services:
 
 ## What SparrowX Can Do
 
-
-### 1. Engineering Knowledge Discovery
-
-**Example multi-hop query:**
-
-> “For the Agentic Orchestrator service, find the latest architecture documents,
-> identify the owning teams and primary engineers, list the related repositories,
-> summarize recent pull-requests or deployments affecting it, and tell me which runbooks
-> should be used if latency increases during agent execution.”
-
-**Expected SparrowX execution:**
-
-* **`intsvc`** resolves the target services, owning teams, associated engineers, and core service metadata.
-* **`docsvc`** searches the vector index for technical documents, repository READMEs, and relevant runbooks.
-* **`agenticsvc`** correlates teams ownership, repository context, recent pull_requests, active deployments, and runbooks evidence into a single, fully cited response.
-
-### 2. Company Intranet / Internal Search
+### 1. Internal Security Investigation
 
 **Example multi-hop query:**
 
-> “Find the current documents for production deployments, then compare them against the Agentic Orchestrator service documents and runbooks to tell me whether the service follows the approved deployment processes.”
+> “An incident report describes suspected credential exposure involving the
+> Agentic Orchestrator service. Identify the responsible team, find the applicable
+> credential-handling policies and incident-response runbooks, and outline the
+> investigation and remediation steps supported by those documents.”
 
 **Expected SparrowX execution:**
 
-* **`docsvc`** retrieves global deployment standards, engineering documents, and service-specific runbooks.
-* **`intsvc`** identifies the specific services, code repositories, and structural metadata.
-* **`agenticsvc`** evaluates the deployment process requirements against the service's historical deployments and active documents to return gaps, evidence, and compliance updates.
+* **`intsvc`** resolves the affected service, owning team, responsible engineers, and available service relationships.
+* **`docsvc`** retrieves the incident report, credential-handling policies, relevant service documentation, and incident-response runbooks.
+* **`agenticsvc`** correlates the reported incident with service context and security guidance, identifies responsible owners, and produces a cited investigation plan that distinguishes documented facts from questions requiring verification.
 
-### 3. Onboarding
+### 2. Internal Knowledge Discovery
 
 **Example multi-hop query:**
 
-> “For a new backend engineer joining the Agentic Service Team, build onboarding-paths
-> using the team’s services, required repositories, architecture documents,
-> access-requests, permissions, runbooks, and open onboarding-tasks.”
+> “For the Agentic Orchestrator service, identify the owning team and primary
+> engineers, find its architecture documents and deployment procedures, and
+> locate the runbooks relevant to increased latency during agent execution.”
 
 **Expected SparrowX execution:**
 
-* **`intsvc`** fetches the target engineers metadata, teams composition, active onboarding_paths, pending onboarding_tasks, and service dependencies.
-* **`docsvc`** extracts getting-started documents, service architecture layouts, and operational runbooks.
-* **`agenticsvc`** builds a sequenced onboarding path flagging required access_requests, missing permissions, mandatory reading documents, and the next actionable onboarding_tasks.
+* **`intsvc`** resolves the service, owning team, associated engineers, and service metadata.
+* **`docsvc`** retrieves relevant architecture documents, deployment procedures, and operational runbooks.
+* **`agenticsvc`** connects ownership and document evidence into a cited answer explaining who is responsible, how the service operates, and which guidance applies.
 
-### 4. Research / Analysis Over Internal Data
+
+### 3. Operational Risk & Process Analysis
 
 **Example multi-hop query:**
 
-> “Analyze whether the Agentic Orchestrator service has operational risks by correlating recent pull_requests, failed deployments, teams modifications, architecture documents, runbooks completeness, and any documents mentioning recurring model timeouts.”
+> “Assess the Agentic Orchestrator service’s readiness for production deployments.
+> Compare its documented procedures with company deployment standards, examine
+> incident reports for recurring model timeouts, and identify gaps in rollback
+> guidance, operational ownership, and runbook coverage.”
 
 **Expected SparrowX execution:**
 
-* **`intsvc`** gathers historical services metrics, teams changes, recent pull_requests activity, and deployment logs.
-* **`docsvc`** indexes architecture documents, internal runbooks, post-mortem documents, and files referencing runtime timeouts.
-* **`agenticsvc`** synthesizes the cross-service evidence into an objective risk profile, maps code changes from pull_requests to failed deployments, and references the exact source documents.
-
+* **`intsvc`** gathers service metadata, ownership, team assignments, and available dependency information.
+* **`docsvc`** retrieves company deployment standards, service procedures, architecture documents, incident reports, and runbooks.
+* **`agenticsvc`** compares documented practices against requirements, identifies recurring issues and evidence gaps, and produces a cited risk assessment with recommended follow-up actions and responsible owners.
 
 ---
 
@@ -112,7 +99,6 @@ This multi-tenant simulation generates active synthetic workloads, allowing you 
 
 | Feature          | Dormant | In Progress | Completed |
 |------------------|---------|-------------|-----------|
-| API Gateway      |   ✅     |             |           |
 | Agentic Service  |        |      ✅       |           |
 | Building Blocks  |         |            |     ✅       |
 | Document Service |        |             |       ✅    |
