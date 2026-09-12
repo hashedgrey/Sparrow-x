@@ -14,11 +14,6 @@ It connects company documents, service ownership, onboarding workflows, runbooks
 repositories and internal domain data into one searchable, explainable assistant.
 
 
->Crucially, this brain is completely self-referential. Upon deployment,
-SparrowX indexes Agentic-Service's own codebase and system architecture into onboarding paths.  
-Incoming developers use the platform itself to learn exactly how to build, scale,
-and navigate an agentic orchestration system.
-
 ## Core Services
 
 SparrowX is built around three core services:
