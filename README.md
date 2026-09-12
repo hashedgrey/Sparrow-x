@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src="resources/sparrow-logo.jpg" width="200" alt="SparrowX Logo" />
+  <img src="resources/sparrow-logo.jpg" width="220" alt="SparrowX Logo" />
 </p>
 
 ---
@@ -8,12 +8,12 @@
 <h1 align="center">Sparrow-X</h1>
 
 <h3 align="center">
-  <em> An agentic internal knowledge system for searchable, explainable engineering intelligence.</em>
+  <em> Intelligent Agent-Powered Company Data.</em>
 </h3>
 
 ---
 
-### 🔁 Runtime Traffic Flow
+<p>🔁 Runtime Traffic Flow</p>
 
 ![Sparrowx Data Flow](resources/sp-architecture-flow.gif)
 
