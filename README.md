@@ -1,7 +1,19 @@
 
-# Sparrow-X
+<p align="center">
+  <img src="resources/sparrow-logo.jpg" width="200" alt="SparrowX Logo" />
+</p>
 
-## 🔁 Runtime Traffic Flow
+---
+
+<h1 align="center">Sparrow-X</h1>
+
+<h3 align="center">
+  <em> An agentic internal knowledge system for searchable, explainable engineering intelligence.</em>
+</h3>
+
+---
+
+### 🔁 Runtime Traffic Flow
 
 ![Sparrowx Data Flow](resources/sp-architecture-flow.gif)
 
