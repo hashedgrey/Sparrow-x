@@ -8,7 +8,7 @@
 <h1 align="center">Sparrow-X</h1>
 
 <h3 align="center">
-  <em> Intelligent Agent-Powered Company Data.</em>
+  <em> Agent-Powered Company Intelligence.</em>
 </h3>
 
 ---
