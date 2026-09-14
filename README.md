@@ -2,9 +2,6 @@
 <p align="center">
   <img src="resources/sparrow-logo.svg" width="270" alt="SparrowX Logo" />
 </p>
-
----
-
 <h1 align="center">Sparrow-X</h1>
 
 <h3 align="center">
