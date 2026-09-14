@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src="resources/sparrow-logo.png" width="270" alt="SparrowX Logo" />
+  <img src="resources/sparrow-logo.svg" width="270" alt="SparrowX Logo" />
 </p>
 
 ---
