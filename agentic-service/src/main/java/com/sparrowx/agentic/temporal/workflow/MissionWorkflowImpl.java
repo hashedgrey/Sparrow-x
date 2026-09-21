@@ -76,8 +76,12 @@ public final class MissionWorkflowImpl implements MissionWorkflow {
 
             } catch (CanceledFailure cancelled) {
                 cancelPersistedMission();
-
             } catch (ActivityFailure failure) {
+
+                if (workflowState.status() == MissionStatus.CANCELLED) {
+                    cancelPersistedMission();
+                    return terminalOutcome();
+                }
                 failPersistedMission(failure);
             }
         }
@@ -86,18 +90,23 @@ public final class MissionWorkflowImpl implements MissionWorkflow {
     }
 
     private void invokeEmbabel() {
+
         MissionActivities.RunMissionResult result =
                 activities.runMission(
-                        new MissionActivities.RunMissionRequest(
-                                input,
-                                workflowState.approvedGateIds(),
+                        new MissionActivities.RunMissionRequest(input, workflowState.approvedGateIds(),
                                 workflowState.startedAt()
                         )
                 );
-        workflowState = workflowState.completed(
-                result.resultRef(),
-                result.completedAt()
-        );
+
+        if (workflowState.status() == MissionStatus.CANCELLED) {
+            return;
+        }
+
+        if (workflowState.terminal()) {
+            return;
+        }
+
+        workflowState = workflowState.completed(result.resultRef(), result.completedAt());
     }
 
     private void waitForPreflightApproval() {
@@ -223,20 +232,21 @@ public final class MissionWorkflowImpl implements MissionWorkflow {
     }
 
     @Override
-    public MissionWorkflowState cancel(
-            MissionWorkflowCommand command
-    ) {
+    public MissionWorkflowState cancel(MissionWorkflowCommand command) {
         awaitInitialized();
+
         requireType(command, MissionWorkflowCommand.CommandType.CANCEL);
+
         if (workflowState.alreadyProcessed(command)) {
             return workflowState;
         }
+
         workflowState = workflowState.cancelled(command, now());
+        cancelPersistedMission();
         if (embabelScope != null) {
             embabelScope.cancel("Mission cancellation requested");
-        } else {
-            cancelPersistedMission();
         }
+
         return workflowState;
     }
 
