@@ -1,33 +1,84 @@
 package com.sparrowx.agentic.components;
 
 import com.embabel.agent.api.common.OperationContext;
+import com.embabel.agent.api.common.PromptRunner;
+import com.embabel.agent.api.streaming.StreamingPromptRunnerBuilder;
+import com.embabel.agent.spi.LlmService;
 import com.sparrowx.agentic.components.PlanningComponent.Observation;
 import com.sparrowx.agentic.governance.model.GovernanceDecision;
 import com.sparrowx.agentic.mission.evidence.Citation;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.Finding;
+import com.sparrowx.agentic.mission.model.MissionStreamEvent;
 import com.sparrowx.agentic.mission.model.Recommendation;
 import com.sparrowx.agentic.mission.model.ResultSection;
 import com.sparrowx.agentic.planning.MissionIntent;
 import com.sparrowx.agentic.planning.MissionPlan;
+import reactor.core.publisher.Flux;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
- * Produces the final grounded mission answer using the Embabel AI runtime
- * associated with the current action execution.
+ * Produces the final grounded mission answer using the Embabel AI runtime.
  *
- * The LLM-facing SynthesisProjection is intentionally small and permissive.
- * Strict SparrowX domain output is constructed only after the projection
- * has been returned by the model.
+ * Synthesis streams the user-facing final answer while still returning one
+ * complete SynthesisDraft for the authoritative MissionResult.
  */
 public final class SynthesisComponent {
 
-    public SynthesisDraft synthesize(SynthesisRequest request, OperationContext context) {
-        Objects.requireNonNull(request, "request must not be null");
-        Objects.requireNonNull(context, "context must not be null");
+    private static final Duration SYNTHESIS_TIMEOUT =
+            Duration.ofMinutes(5);
+
+    private static final String FINAL_OPEN =
+            "<final_answer>";
+
+    private static final String FINAL_CLOSE =
+            "</final_answer>";
+
+    private static final String SUMMARY_OPEN =
+            "<executive_summary>";
+
+    private static final String SUMMARY_CLOSE =
+            "</executive_summary>";
+
+    private final SynthesisStreamingLlmSupport streamingLlmSupport;
+
+    public SynthesisComponent(
+            SynthesisStreamingLlmSupport streamingLlmSupport
+    ) {
+        this.streamingLlmSupport =
+                Objects.requireNonNull(
+                        streamingLlmSupport,
+                        "streamingLlmSupport must not be null"
+                );
+    }
+
+    public SynthesisDraft synthesize(
+            SynthesisRequest request,
+            OperationContext context,
+            Consumer<MissionStreamEvent> streamEventSink
+    ) {
+        Objects.requireNonNull(
+                request,
+                "request must not be null"
+        );
+
+        Objects.requireNonNull(
+                context,
+                "context must not be null"
+        );
+
+        Objects.requireNonNull(
+                streamEventSink,
+                "streamEventSink must not be null"
+        );
 
         if (!request.reactorComplete()) {
             throw new IllegalStateException(
@@ -35,23 +86,150 @@ public final class SynthesisComponent {
             );
         }
 
-        SynthesisProjection projection =
-                context.ai().withDefaultLlm().createObject(
-                                synthesisPrompt(request),
-                                SynthesisProjection.class
+        String operationId =
+                "synthesis:"
+                        + UUID.randomUUID();
+
+        LlmService<?> synthesisLlm =
+                streamingLlmSupport.create(
+                        usage ->
+                                streamEventSink.accept(
+                                        usageEvent(
+                                                request.missionId(),
+                                                operationId,
+                                                usage
+                                        )
+                                )
+                );
+
+        PromptRunner runner =
+                context.ai()
+                        .withLlmService(
+                                synthesisLlm
                         );
+
+        Flux<String> stream =
+                new StreamingPromptRunnerBuilder(runner)
+                        .streaming()
+                        .withPrompt(
+                                synthesisPrompt(request)
+                        )
+                        .generateStream();
+
+        StringBuilder raw =
+                new StringBuilder();
+
+        AtomicLong sequence =
+                new AtomicLong(0L);
+
+        FinalAnswerProjector projector =
+                new FinalAnswerProjector();
+
+        stream.doOnNext(chunk -> {
+
+                    if (chunk == null || chunk.isEmpty()) {
+                        return;
+                    }
+
+                    raw.append(chunk);
+
+                    projector.project(
+                            raw,
+                            text -> {
+                                if (text.isEmpty()) {
+                                    return;
+                                }
+
+                                long nextSequence =
+                                        sequence.incrementAndGet();
+
+                                streamEventSink.accept(
+                                        new MissionStreamEvent.AnswerDelta(
+                                                request.missionId(),
+                                                nextSequence,
+                                                text,
+                                                answerResumeToken(
+                                                        request.missionId(),
+                                                        nextSequence
+                                                ),
+                                                Instant.now()
+                                        )
+                                );
+                            }
+                    );
+                })
+                .blockLast(
+                        SYNTHESIS_TIMEOUT
+                );
+
+        SynthesisProjection projection =
+                parseProjection(
+                        raw.toString()
+                );
 
         return toDraft(projection);
     }
 
+    private static MissionStreamEvent.Usage usageEvent(
+            String missionId,
+            String operationId,
+            SynthesisStreamingLlmSupport.UsageSnapshot usage
+    ) {
+        return new MissionStreamEvent.Usage(
+                missionId,
+
+                operationId,
+
+                MissionStreamEvent.UsageKind.LLM,
+
+                "synthesis-component",
+
+                usage.model(),
+
+                usage.inputTokens(),
+
+                /*
+                 * Spring AI's generic Usage object does not expose
+                 * cached-input tokens as a portable first-class field.
+                 */
+                0L,
+
+                usage.outputTokens(),
+
+                usage.totalTokens(),
+
+                0L,
+
+                0L,
+
+                usage.durationMs(),
+
+                usageResumeToken(
+                        missionId,
+                        operationId
+                ),
+
+                usage.emittedAt()
+        );
+    }
+
+    private static String usageResumeToken(
+            String missionId,
+            String operationId
+    ) {
+        return "usage:"
+                + missionId
+                + ":"
+                + operationId;
+    }
+
     /**
-     * Builds the model input from the frozen mission reasoning state.
-     *
-     * No retrieval or tool execution should happen here. By this point,
-     * evidence collection has completed and synthesis operates only over
-     * the supplied intent, plan, observations and evidence references.
+     * Final answer is deliberately first so user-visible content can begin
+     * streaming before the executive summary has been generated.
      */
-    private static String synthesisPrompt(SynthesisRequest request) {
+    private static String synthesisPrompt(
+            SynthesisRequest request
+    ) {
         return """
             You are the final synthesis stage of SparrowX.
             Produce a grounded final response for the mission below.
@@ -87,7 +265,7 @@ public final class SynthesisComponent {
             <mission_context>
             %s
             </mission_context>
-            
+
             <citations>
             %s
             </citations>
@@ -100,21 +278,26 @@ public final class SynthesisComponent {
             - Preserve uncertainty when the evidence is incomplete.
             - Respect warnings and governance decisions present in the context.
             - Do not claim that evidence proves something it does not support.
-            - The executiveSummary should briefly state the important result.
-            - The finalAnswer should contain the complete user-facing answer.
-            - Do not include implementation/debug commentary in the finalAnswer.
+            - The final answer must contain the complete user-facing answer.
+            - The executive summary must briefly state the important result.
+            - Preserve Markdown headings and lists inside the final answer when useful.
+            - Do not include implementation or debug commentary.
 
-            Structured output requirements:
+            Output protocol:
 
-            - Return exactly one object matching the requested SynthesisProjection structure.
-            - Populate exactly these fields: executiveSummary and finalAnswer.
-            - Both fields must be strings.
-            - The output must be valid JSON.
-            - Do not wrap the object in Markdown code fences.
-            - Do not emit text before or after the object.
-            - Do not use literal double quotation marks inside executiveSummary or finalAnswer. Use single quotation marks instead when quotation is necessary.
-            - Preserve Markdown headings and lists inside finalAnswer when useful.
-            - Ensure all newline and special characters are valid inside a JSON string.
+            - Output exactly the following two tagged sections.
+            - Output final_answer FIRST.
+            - Do not emit any text before <final_answer>.
+            - Do not emit any text after </executive_summary>.
+            - Do not wrap the response in Markdown code fences.
+            - Do not omit or rename the tags.
+
+            <final_answer>
+            complete user-facing answer
+            </final_answer>
+            <executive_summary>
+            concise summary
+            </executive_summary>
             """.formatted(
                 request.missionId(),
                 request.intent(),
@@ -128,13 +311,77 @@ public final class SynthesisComponent {
         );
     }
 
-    /**
-     * Converts the loose LLM-facing projection into SparrowX's strict
-     * synthesis domain result.
-     *
-     * Keep complex domain types out of the LLM projection until the basic
-     * end-to-end synthesis path has been validated.
-     */
+    private static SynthesisProjection parseProjection(
+            String raw
+    ) {
+        String finalAnswer =
+                extractRequired(
+                        raw,
+                        FINAL_OPEN,
+                        FINAL_CLOSE,
+                        "finalAnswer"
+                ).strip();
+
+        String executiveSummary =
+                extractRequired(
+                        raw,
+                        SUMMARY_OPEN,
+                        SUMMARY_CLOSE,
+                        "executiveSummary"
+                ).strip();
+
+        return new SynthesisProjection(
+                executiveSummary,
+                finalAnswer
+        );
+    }
+
+    private static String extractRequired(
+            String raw,
+            String open,
+            String close,
+            String field
+    ) {
+        int start =
+                raw.indexOf(open);
+
+        if (start < 0) {
+            throw new IllegalStateException(
+                    "Streaming synthesis omitted "
+                            + open
+            );
+        }
+
+        start += open.length();
+
+        int end =
+                raw.indexOf(
+                        close,
+                        start
+                );
+
+        if (end < 0) {
+            throw new IllegalStateException(
+                    "Streaming synthesis omitted "
+                            + close
+            );
+        }
+
+        String value =
+                raw.substring(
+                        start,
+                        end
+                );
+
+        if (value.isBlank()) {
+            throw new IllegalStateException(
+                    field + " was blank"
+            );
+        }
+
+        return value;
+    }
+
     private static SynthesisDraft toDraft(
             SynthesisProjection projection
     ) {
@@ -152,17 +399,159 @@ public final class SynthesisComponent {
                 Map.of(),
                 Map.of(
                         "synthesisEngine",
-                        "embabel-operation-context"
+                        "embabel-streaming-operation-context"
                 )
         );
     }
 
+    private static String answerResumeToken(
+            String missionId,
+            long sequence
+    ) {
+        return "answer:"
+                + missionId
+                + ":"
+                + sequence;
+    }
+
     /**
-     * LLM-facing structured output.
+     * Emits only content inside final_answer.
      *
-     * This deliberately does not expose ResultSection, Finding,
-     * Recommendation or other strict domain records directly to the model.
+     * It retains any suffix that might be the beginning of the closing
+     * marker so tag fragments are never sent to the UI.
      */
+    private static final class FinalAnswerProjector {
+
+        private int contentStart = -1;
+        private int nextIndex = -1;
+        private boolean closed;
+
+        private void project(
+                StringBuilder raw,
+                Consumer<String> sink
+        ) {
+            if (closed) {
+                return;
+            }
+
+            if (contentStart < 0) {
+
+                int open =
+                        raw.indexOf(
+                                FINAL_OPEN
+                        );
+
+                if (open < 0) {
+                    return;
+                }
+
+                contentStart =
+                        open + FINAL_OPEN.length();
+
+                nextIndex =
+                        contentStart;
+            }
+
+            int close =
+                    raw.indexOf(
+                            FINAL_CLOSE,
+                            contentStart
+                    );
+
+            int safeEnd;
+
+            if (close >= 0) {
+                safeEnd = close;
+            } else {
+                safeEnd =
+                        raw.length()
+                                - partialMarkerSuffixLength(
+                                raw,
+                                FINAL_CLOSE,
+                                contentStart
+                        );
+            }
+
+            if (nextIndex == contentStart) {
+                while (nextIndex < safeEnd) {
+
+                    char current =
+                            raw.charAt(nextIndex);
+
+                    if (current != '\n'
+                            && current != '\r') {
+                        break;
+                    }
+
+                    nextIndex++;
+                }
+            }
+
+            if (safeEnd > nextIndex) {
+
+                String delta =
+                        raw.substring(
+                                nextIndex,
+                                safeEnd
+                        );
+
+                nextIndex =
+                        safeEnd;
+
+                sink.accept(delta);
+            }
+
+            if (close >= 0) {
+                closed = true;
+            }
+        }
+
+        private static int partialMarkerSuffixLength(
+                StringBuilder raw,
+                String marker,
+                int minimumIndex
+        ) {
+            int available =
+                    raw.length()
+                            - minimumIndex;
+
+            int max =
+                    Math.min(
+                            marker.length() - 1,
+                            available
+                    );
+
+            for (int length = max;
+                 length > 0;
+                 length--) {
+
+                int rawStart =
+                        raw.length() - length;
+
+                boolean match = true;
+
+                for (int index = 0;
+                     index < length;
+                     index++) {
+
+                    if (raw.charAt(
+                            rawStart + index
+                    ) != marker.charAt(index)) {
+
+                        match = false;
+                        break;
+                    }
+                }
+
+                if (match) {
+                    return length;
+                }
+            }
+
+            return 0;
+        }
+    }
+
     public record SynthesisProjection(
             String executiveSummary,
             String finalAnswer
@@ -182,15 +571,65 @@ public final class SynthesisComponent {
             Map<String, Object> context
     ) {
         public SynthesisRequest {
-            missionId = requireText(missionId, "missionId");
-            intent = Objects.requireNonNull(intent, "intent must not be null");
-            finalPlan = Objects.requireNonNull(finalPlan, "finalPlan must not be null");
-            observations = observations == null ? List.of() : List.copyOf(observations);
-            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
-            citations = citations == null ? List.of() : List.copyOf(citations);
-            governanceDecisions = governanceDecisions == null ? List.of() : List.copyOf(governanceDecisions);
-            requiredSections = requiredSections == null ? List.of() : List.copyOf(requiredSections);
-            context = context == null ? Map.of() : Map.copyOf(context);
+            missionId =
+                    requireText(
+                            missionId,
+                            "missionId"
+                    );
+
+            intent =
+                    Objects.requireNonNull(
+                            intent,
+                            "intent must not be null"
+                    );
+
+            finalPlan =
+                    Objects.requireNonNull(
+                            finalPlan,
+                            "finalPlan must not be null"
+                    );
+
+            observations =
+                    observations == null
+                            ? List.of()
+                            : List.copyOf(
+                            observations
+                    );
+
+            evidenceRefs =
+                    evidenceRefs == null
+                            ? List.of()
+                            : List.copyOf(
+                            evidenceRefs
+                    );
+
+            citations =
+                    citations == null
+                            ? List.of()
+                            : List.copyOf(
+                            citations
+                    );
+
+            governanceDecisions =
+                    governanceDecisions == null
+                            ? List.of()
+                            : List.copyOf(
+                            governanceDecisions
+                    );
+
+            requiredSections =
+                    requiredSections == null
+                            ? List.of()
+                            : List.copyOf(
+                            requiredSections
+                    );
+
+            context =
+                    context == null
+                            ? Map.of()
+                            : Map.copyOf(
+                            context
+                    );
         }
     }
 
@@ -204,34 +643,51 @@ public final class SynthesisComponent {
             Map<String, Object> debugSummary
     ) {
         public SynthesisDraft {
-            executiveSummary = executiveSummary == null
-                    ? ""
-                    : executiveSummary;
+            executiveSummary =
+                    executiveSummary == null
+                            ? ""
+                            : executiveSummary;
 
-            finalAnswer = requireText(
-                    finalAnswer,
-                    "finalAnswer"
-            );
+            finalAnswer =
+                    requireText(
+                            finalAnswer,
+                            "finalAnswer"
+                    );
 
-            sections = sections == null
-                    ? List.of()
-                    : List.copyOf(sections);
+            sections =
+                    sections == null
+                            ? List.of()
+                            : List.copyOf(
+                            sections
+                    );
 
-            findings = findings == null
-                    ? List.of()
-                    : List.copyOf(findings);
+            findings =
+                    findings == null
+                            ? List.of()
+                            : List.copyOf(
+                            findings
+                    );
 
-            recommendations = recommendations == null
-                    ? List.of()
-                    : List.copyOf(recommendations);
+            recommendations =
+                    recommendations == null
+                            ? List.of()
+                            : List.copyOf(
+                            recommendations
+                    );
 
-            structuredOutput = structuredOutput == null
-                    ? Map.of()
-                    : Map.copyOf(structuredOutput);
+            structuredOutput =
+                    structuredOutput == null
+                            ? Map.of()
+                            : Map.copyOf(
+                            structuredOutput
+                    );
 
-            debugSummary = debugSummary == null
-                    ? Map.of()
-                    : Map.copyOf(debugSummary);
+            debugSummary =
+                    debugSummary == null
+                            ? Map.of()
+                            : Map.copyOf(
+                            debugSummary
+                    );
         }
     }
 
@@ -239,7 +695,9 @@ public final class SynthesisComponent {
             String value,
             String field
     ) {
-        if (value == null || value.isBlank()) {
+        if (value == null
+                || value.isBlank()) {
+
             throw new IllegalArgumentException(
                     field + " must not be blank"
             );
