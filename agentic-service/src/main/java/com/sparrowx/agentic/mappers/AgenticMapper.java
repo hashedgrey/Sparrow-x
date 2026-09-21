@@ -12,7 +12,6 @@ import com.sparrowx.agentic.features.getmissionresult.GetMissionResultQuery;
 import com.sparrowx.agentic.features.getmissionresult.GetMissionResultView;
 import com.sparrowx.agentic.features.rejectmissiongate.RejectMissionGateCommand;
 import com.sparrowx.agentic.features.rejectmissiongate.RejectMissionGateResult;
-import com.sparrowx.agentic.features.streammissionprogress.MissionProgressEventView;
 import com.sparrowx.agentic.features.streammissionprogress.StreamMissionProgressQuery;
 import com.sparrowx.agentic.features.submitmission.SubmitMissionCommand;
 import com.sparrowx.agentic.features.submitmission.SubmitMissionResult;
@@ -28,7 +27,6 @@ import com.sparrowx.agentic.mission.model.Recommendation;
 import com.sparrowx.agentic.mission.model.ResultSection;
 import com.sparrowx.agentic.proto.*;
 import com.sparrowx.agentic.proto.InputArtifact.ContentCase;
-import com.sparrowx.agentic.proto.MissionProgressEvent;
 import com.sparrowx.agentic.util.ProtoTimestamps;
 import io.grpc.StatusRuntimeException;
 import org.springframework.stereotype.Component;
@@ -226,12 +224,6 @@ public final class AgenticMapper {
         }
 
         return builder.build();
-    }
-
-    public MissionProgressEvent toMissionProgressEvent(
-            MissionProgressEventView view
-    ) {
-        return missionEventGrpcMapper.toProto(view);
     }
 
     public CancelMissionCommand toCancelMissionCommand(

@@ -1,12 +1,12 @@
 package com.sparrowx.agentic.features.streammissionprogress;
 
 import buildingblocks.core.queries.QueryHandler;
-import com.sparrowx.agentic.mission.model.Mission;
-import com.sparrowx.agentic.mission.model.MissionProgressEvent;
 import com.sparrowx.agentic.exceptions.AgenticServiceException;
 import com.sparrowx.agentic.exceptions.MissionNotFoundException;
-import com.sparrowx.agentic.runtime.store.RuntimeEventStore;
+import com.sparrowx.agentic.mission.model.Mission;
+import com.sparrowx.agentic.mission.model.MissionStreamEvent;
 import com.sparrowx.agentic.mission.store.MissionStore;
+import com.sparrowx.agentic.runtime.store.RuntimeEventStore;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -14,9 +14,13 @@ import java.util.List;
 
 @Component
 public final class StreamMissionProgressQueryHandler
-        implements QueryHandler<StreamMissionProgressQuery, MissionEventCursor> {
+        implements QueryHandler<
+        StreamMissionProgressQuery,
+        MissionEventCursor
+        > {
 
-    private static final int REPLAY_PAGE_SIZE = 500;
+    private static final int REPLAY_PAGE_SIZE =
+            500;
 
     private final StreamMissionProgressQueryValidator validator;
     private final MissionStore missionStore;
@@ -33,31 +37,48 @@ public final class StreamMissionProgressQueryHandler
     }
 
     @Override
-    public MissionEventCursor handle(StreamMissionProgressQuery query) {
+    public MissionEventCursor handle(
+            StreamMissionProgressQuery query
+    ) {
         validator.validate(query);
 
-        Mission mission = missionStore.findById(
-                        query.tenantId(),
-                        query.missionId()
-                )
-                .orElseThrow(() -> new MissionNotFoundException(
-                        query.tenantId(),
-                        query.missionId()
-                ));
+        Mission mission =
+                missionStore
+                        .findById(
+                                query.tenantId(),
+                                query.missionId()
+                        )
+                        .orElseThrow(() ->
+                                new MissionNotFoundException(
+                                        query.tenantId(),
+                                        query.missionId()
+                                )
+                        );
 
-        if (!query.tenantId().equals(mission.tenantId())
-                || !query.missionId().equals(mission.missionId())) {
+        if (!query.tenantId().equals(
+                mission.tenantId()
+        )
+                || !query.missionId().equals(
+                mission.missionId()
+        )) {
+
             throw new AgenticServiceException(
                     "Mission lookup returned cross-scoped state."
             );
         }
 
-        List<MissionProgressEvent> replay = new ArrayList<>();
-        String cursorToken = query.resumeToken();
-        boolean terminalEventSeen = false;
+        List<MissionStreamEvent> replay =
+                new ArrayList<>();
+
+        String cursorToken =
+                query.resumeToken();
+
+        boolean terminalEventSeen =
+                false;
 
         while (!terminalEventSeen) {
-            List<MissionProgressEvent> page =
+
+            List<MissionStreamEvent> page =
                     runtimeEventStore.readAfter(
                             query.tenantId(),
                             query.missionId(),
@@ -75,18 +96,26 @@ public final class StreamMissionProgressQueryHandler
                 break;
             }
 
-            String previousToken = cursorToken;
+            String previousToken =
+                    cursorToken;
 
-            for (MissionProgressEvent event : page) {
-                validateEventScope(query, event);
+            for (MissionStreamEvent event : page) {
+
+                validateEventScope(
+                        query,
+                        event
+                );
+
                 replay.add(event);
 
                 if (event.resumeToken() != null
                         && !event.resumeToken().isBlank()) {
-                    cursorToken = event.resumeToken().trim();
+
+                    cursorToken =
+                            event.resumeToken().trim();
                 }
 
-                if (MissionEventCursor.isTerminal(event.status())) {
+                if (MissionEventCursor.isTerminal(event)) {
                     terminalEventSeen = true;
                     break;
                 }
@@ -95,21 +124,28 @@ public final class StreamMissionProgressQueryHandler
             if (terminalEventSeen
                     || page.size() < REPLAY_PAGE_SIZE
                     || cursorToken.equals(previousToken)) {
+
                 break;
             }
         }
 
         boolean durableMissionIsTerminal =
-                MissionEventCursor.isTerminal(mission.status());
+                MissionEventCursor.isTerminal(
+                        mission.status()
+                );
 
-        RuntimeEventStore.EventSubscription subscription = null;
+        RuntimeEventStore.EventSubscription subscription =
+                null;
 
-        if (!terminalEventSeen && !durableMissionIsTerminal) {
-            subscription = runtimeEventStore.subscribeAfter(
-                    query.tenantId(),
-                    query.missionId(),
-                    cursorToken
-            );
+        if (!terminalEventSeen
+                && !durableMissionIsTerminal) {
+
+            subscription =
+                    runtimeEventStore.subscribeAfter(
+                            query.tenantId(),
+                            query.missionId(),
+                            cursorToken
+                    );
 
             if (subscription == null) {
                 throw new AgenticServiceException(
@@ -127,7 +163,7 @@ public final class StreamMissionProgressQueryHandler
 
     private static void validateEventScope(
             StreamMissionProgressQuery query,
-            MissionProgressEvent event
+            MissionStreamEvent event
     ) {
         if (event == null) {
             throw new AgenticServiceException(
@@ -135,7 +171,9 @@ public final class StreamMissionProgressQueryHandler
             );
         }
 
-        if (!query.missionId().equals(event.missionId())) {
+        if (!query.missionId().equals(
+                event.missionId()
+        )) {
             throw new AgenticServiceException(
                     "Runtime event belongs to a different mission."
             );

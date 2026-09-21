@@ -15,14 +15,17 @@ import "google/protobuf/struct.proto";
 // =========================
 
 service AgenticService {
-  rpc SubmitMission(SubmitMissionRequest) returns (SubmitMissionResponse);
+  rpc SubmitMission(SubmitMissionRequest)
+      returns (SubmitMissionResponse);
 
   rpc StreamMissionProgress(StreamMissionProgressRequest)
-      returns (stream MissionProgressEvent);
+      returns (stream MissionStreamEvent);
 
-  rpc GetMissionResult(GetMissionResultRequest) returns (MissionResultResponse);
+  rpc GetMissionResult(GetMissionResultRequest)
+      returns (MissionResultResponse);
 
-  rpc CancelMission(CancelMissionRequest) returns (CancelMissionResponse);
+  rpc CancelMission(CancelMissionRequest)
+      returns (CancelMissionResponse);
 
   rpc ApproveMissionGate(ApproveMissionGateRequest)
       returns (ApproveMissionGateResponse);
@@ -47,6 +50,7 @@ message RequestContext {
   string session_id = 9;
   string conversation_id = 10;
   string client_channel = 11;
+
   map<string, string> metadata = 20;
 }
 
@@ -57,7 +61,9 @@ message RequestContext {
 message SubmitMissionRequest {
   RequestContext context = 1;
   string query = 2;
+
   repeated InputArtifact input_artifacts = 3;
+
   MissionConstraints constraints = 10;
   MissionBudget budget = 11;
 }
@@ -93,13 +99,17 @@ message MissionResultResponse {
 
 message MissionConstraints {
   MissionPath preferred_path = 1;
+
   repeated string allowed_tools = 10;
   repeated string allowed_source_services = 11;
   repeated string required_output_sections = 12;
+
   bool require_citations = 20;
   bool require_human_review = 21;
   bool allow_external_sources = 22;
+
   google.protobuf.Duration max_runtime = 30;
+
   map<string, string> policy_hints = 40;
 }
 
@@ -108,6 +118,7 @@ message MissionBudget {
   int32 max_tool_calls = 2;
   int32 max_retrieval_queries = 3;
   int32 max_items_to_hydrate = 4;
+
   int64 max_input_tokens = 10;
   int64 max_output_tokens = 11;
   int64 max_cost_micros = 12;
@@ -131,6 +142,7 @@ message InputArtifact {
   string filename = 20;
   string content_type = 21;
   string sha256 = 22;
+
   map<string, string> metadata = 30;
 }
 
@@ -147,7 +159,7 @@ enum ArtifactType {
 }
 
 // =========================
-// Progress Streaming
+// Mission Streaming
 // =========================
 
 message StreamMissionProgressRequest {
@@ -156,28 +168,96 @@ message StreamMissionProgressRequest {
   string resume_token = 3;
 }
 
+/*
+ * Durable public mission stream.
+ *
+ * One ordered stream carries lifecycle progress,
+ * incremental answer text, and model-operation usage.
+ */
+message MissionStreamEvent {
+  string mission_id = 1;
+  string resume_token = 2;
+  google.protobuf.Timestamp emitted_at = 3;
+
+  oneof payload {
+    MissionProgressEvent progress = 10;
+    MissionAnswerDelta answer_delta = 11;
+    MissionUsage usage = 12;
+  }
+}
+
+/*
+ * Mission/action lifecycle progress.
+ */
 message MissionProgressEvent {
   string mission_id = 1;
   MissionStatus status = 2;
+
   string stage_id = 10;
   string stage_name = 11;
+
   string step_id = 20;
   string step_name = 21;
   StepStatus step_status = 22;
+
   ComponentInvocation current_component = 30;
+
   string message = 40;
   double progress_percent = 41;
+
   string resume_token = 50;
+
   google.protobuf.Timestamp emitted_at = 60;
+
   map<string, string> metadata = 70;
+}
+
+/*
+ * Incremental user-facing answer content.
+ */
+message MissionAnswerDelta {
+  int64 sequence = 1;
+  string text = 2;
+}
+
+/*
+ * Usage produced by one concrete model operation.
+ *
+ * This is not an accumulated mission total.
+ * Mission totals are derived by aggregating usage events.
+ */
+message MissionUsage {
+  string operation_id = 1;
+  UsageKind kind = 2;
+
+  string component_id = 3;
+  string model = 4;
+
+  int64 input_tokens = 10;
+  int64 cached_input_tokens = 11;
+  int64 output_tokens = 12;
+  int64 total_tokens = 13;
+
+  int64 embedding_tokens = 20;
+  int64 vectors_generated = 21;
+
+  int64 duration_ms = 30;
+}
+
+enum UsageKind {
+  USAGE_KIND_UNSPECIFIED = 0;
+  USAGE_KIND_LLM = 1;
+  USAGE_KIND_EMBEDDING = 2;
 }
 
 message ComponentInvocation {
   string component_id = 1;
   ComponentKind component_kind = 2;
   string component_name = 3;
+
   google.protobuf.Struct input_summary = 10;
   google.protobuf.Struct output_summary = 11;
+
   google.protobuf.Timestamp started_at = 20;
   google.protobuf.Timestamp completed_at = 21;
 }
@@ -203,12 +283,15 @@ message MissionResult {
   string mission_id = 1;
   string executive_summary = 2;
   string final_answer = 3;
+
   repeated ResultSection sections = 10;
   repeated Finding findings = 11;
   repeated Recommendation recommendations = 12;
+
   repeated EvidenceRef evidence_refs = 20;
   repeated Citation citations = 21;
   repeated GovernanceDecision governance_decisions = 22;
+
   google.protobuf.Struct structured_output = 80;
   google.protobuf.Struct debug_summary = 90;
 }
@@ -218,9 +301,11 @@ message ResultSection {
   string title = 2;
   string body = 3;
   int32 order = 4;
+
   repeated string finding_ids = 10;
   repeated string recommendation_ids = 11;
   repeated string evidence_ids = 12;
+
   google.protobuf.Struct attributes = 90;
 }
 
@@ -228,12 +313,16 @@ message Finding {
   string finding_id = 1;
   string title = 2;
   string summary = 3;
+
   FindingType type = 10;
+
   double confidence_score = 20;
   double severity_score = 21;
   double priority_score = 22;
+
   repeated string related_finding_ids = 30;
   repeated string evidence_ids = 31;
+
   google.protobuf.Struct attributes = 90;
 }
 
@@ -254,12 +343,16 @@ message Recommendation {
   string recommendation_id = 1;
   string title = 2;
   string recommendation = 3;
+
   string owner = 10;
   string priority = 11;
+
   double confidence_score = 20;
   double priority_score = 21;
+
   repeated string linked_finding_ids = 30;
   repeated string evidence_ids = 31;
+
   google.protobuf.Struct attributes = 90;
 }
 
@@ -270,18 +363,23 @@ message Recommendation {
 message EvidenceRef {
   string evidence_id = 1;
   EvidenceSourceType source_type = 2;
+
   string source_service = 10;
   string source_id = 11;
   string source_uri = 12;
+
   string artifact_id = 20;
   string object_id = 21;
   string parent_object_id = 22;
+
   string location_label = 30;
   int32 page_start = 31;
   int32 page_end = 32;
   string section = 33;
   string chunk_id = 34;
+
   string sha256 = 40;
+
   google.protobuf.Struct attributes = 90;
 }
 
@@ -308,6 +406,7 @@ message GovernanceDecision {
   string policy_name = 2;
   GovernanceDecisionType decision = 3;
   string reason = 4;
+
   google.protobuf.Struct attributes = 90;
 }
 
@@ -330,8 +429,11 @@ message HumanGate {
   string mission_id = 2;
   string title = 3;
   string reason = 4;
+
   repeated string required_reviewer_roles = 10;
+
   google.protobuf.Struct review_payload = 20;
+
   google.protobuf.Timestamp created_at = 30;
   google.protobuf.Timestamp expires_at = 31;
 }
@@ -416,8 +518,10 @@ message MissionError {
   string code = 1;
   string message = 2;
   bool retryable = 3;
+
   string failed_stage_id = 10;
   string failed_step_id = 11;
   string failed_component_id = 12;
+
   google.protobuf.Struct details = 90;
 }

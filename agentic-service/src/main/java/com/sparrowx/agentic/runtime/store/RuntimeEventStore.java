@@ -1,29 +1,33 @@
 package com.sparrowx.agentic.runtime.store;
 
-import com.sparrowx.agentic.mission.model.MissionProgressEvent;
+import com.sparrowx.agentic.mission.model.MissionStreamEvent;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 
 /**
- * Tenant-scoped persistence and tailing port for public progress events.
+ * Tenant-scoped persistence and tailing port for durable public mission
+ * stream events.
+ *
+ * Events include progress updates, answer deltas and aggregate usage.
  */
 public interface RuntimeEventStore {
 
     /**
-     * Idempotently appends by stable resume token.
+     * Idempotently appends an event by stable resume token.
      */
-    MissionProgressEvent append(
+    MissionStreamEvent append(
             String tenantId,
-            MissionProgressEvent event
+            MissionStreamEvent event
     );
 
     /**
-     * Reads strictly after the supplied token. An empty token starts at the
-     * earliest retained event.
+     * Reads strictly after the supplied token.
+     *
+     * An empty token starts at the earliest retained mission event.
      */
-    List<MissionProgressEvent> readAfter(
+    List<MissionStreamEvent> readAfter(
             String tenantId,
             String missionId,
             String resumeToken,
@@ -42,7 +46,9 @@ public interface RuntimeEventStore {
 
     interface EventSubscription extends AutoCloseable {
 
-        Optional<MissionProgressEvent> next(Duration waitTimeout);
+        Optional<MissionStreamEvent> next(
+                Duration waitTimeout
+        );
 
         String resumeToken();
 

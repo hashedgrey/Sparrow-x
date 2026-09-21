@@ -75,10 +75,31 @@ public class RuntimeEventEntity {
     )
     private String resumeToken;
 
+    /**
+     * Durable stream payload discriminator.
+     *
+     * Current values:
+     * - PROGRESS
+     * - ANSWER_DELTA
+     * - USAGE
+     */
+    @Column(
+            name = "event_kind",
+            nullable = false,
+            updatable = false,
+            length = 32
+    )
+    private String eventKind;
+
+    /**
+     * Projection used only for progress events.
+     *
+     * Answer deltas and usage events do not carry mission status directly.
+     */
     @Enumerated(EnumType.STRING)
     @Column(
             name = "mission_status",
-            nullable = false,
+            nullable = true,
             updatable = false,
             length = 32
     )
@@ -107,6 +128,7 @@ public class RuntimeEventEntity {
             String tenantId,
             String missionId,
             String resumeToken,
+            String eventKind,
             MissionStatus missionStatus,
             Map<String, Object> eventPayload,
             Instant emittedAt
@@ -114,6 +136,7 @@ public class RuntimeEventEntity {
         this.tenantId = tenantId;
         this.missionId = missionId;
         this.resumeToken = resumeToken;
+        this.eventKind = eventKind;
         this.missionStatus = missionStatus;
         this.eventPayload = eventPayload == null
                 ? Map.of()
@@ -126,5 +149,4 @@ public class RuntimeEventEntity {
                 ? Map.of()
                 : Map.copyOf(eventPayload);
     }
-
 }

@@ -3,7 +3,7 @@ package com.sparrowx.agentic.data.postgres.adapters;
 import com.sparrowx.agentic.data.postgres.entities.RuntimeEventEntity;
 import com.sparrowx.agentic.data.postgres.mappers.RuntimeEventEntityMapper;
 import com.sparrowx.agentic.data.postgres.repositories.RuntimeEventJpaRepository;
-import com.sparrowx.agentic.mission.model.MissionProgressEvent;
+import com.sparrowx.agentic.mission.model.MissionStreamEvent;
 import com.sparrowx.agentic.runtime.store.RuntimeEventStore;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
@@ -17,11 +17,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
 /**
- * PostgreSQL-backed replay and tailing store for public mission progress.
+ * PostgreSQL-backed replay and tailing store for public mission stream events.
+ *
+ * The store persists progress, answer-delta and usage events in one ordered
+ * mission stream.
  *
  * Empty resume tokens start before the earliest retained event. Temporal
  * history remains the execution authority; these rows exist only for the
- * public streaming projection.
+ * durable public streaming projection.
  */
 @Component
 public final class PostgresRuntimeEventStore
@@ -41,6 +44,7 @@ public final class PostgresRuntimeEventStore
                 repository,
                 "repository must not be null"
         );
+
         this.mapper = Objects.requireNonNull(
                 mapper,
                 "mapper must not be null"
@@ -48,12 +52,19 @@ public final class PostgresRuntimeEventStore
     }
 
     @Override
-    public MissionProgressEvent append(
+    public MissionStreamEvent append(
             String tenantId,
-            MissionProgressEvent event
+            MissionStreamEvent event
     ) {
-        tenantId = requireText(tenantId, "tenantId");
-        Objects.requireNonNull(event, "event must not be null");
+        tenantId = requireText(
+                tenantId,
+                "tenantId"
+        );
+
+        Objects.requireNonNull(
+                event,
+                "event must not be null"
+        );
 
         if (event.resumeToken() == null
                 || event.resumeToken().isBlank()) {
@@ -78,12 +89,18 @@ public final class PostgresRuntimeEventStore
         }
 
         try {
-            RuntimeEventEntity saved = repository.saveAndFlush(
-                    mapper.toEntity(tenantId, event)
-            );
+            RuntimeEventEntity saved =
+                    repository.saveAndFlush(
+                            mapper.toEntity(
+                                    tenantId,
+                                    event
+                            )
+                    );
 
             return mapper.toDomain(saved);
+
         } catch (DataIntegrityViolationException exception) {
+
             RuntimeEventEntity concurrent =
                     repository
                             .findByTenantIdAndMissionIdAndResumeToken(
@@ -107,14 +124,21 @@ public final class PostgresRuntimeEventStore
     }
 
     @Override
-    public List<MissionProgressEvent> readAfter(
+    public List<MissionStreamEvent> readAfter(
             String tenantId,
             String missionId,
             String resumeToken,
             int limit
     ) {
-        tenantId = requireText(tenantId, "tenantId");
-        missionId = requireText(missionId, "missionId");
+        tenantId = requireText(
+                tenantId,
+                "tenantId"
+        );
+
+        missionId = requireText(
+                missionId,
+                "missionId"
+        );
 
         if (limit < 1) {
             throw new IllegalArgumentException(
@@ -133,7 +157,10 @@ public final class PostgresRuntimeEventStore
                         tenantId,
                         missionId,
                         afterId,
-                        PageRequest.of(0, limit)
+                        PageRequest.of(
+                                0,
+                                limit
+                        )
                 )
                 .stream()
                 .map(mapper::toDomain)
@@ -146,8 +173,15 @@ public final class PostgresRuntimeEventStore
             String missionId,
             String resumeToken
     ) {
-        tenantId = requireText(tenantId, "tenantId");
-        missionId = requireText(missionId, "missionId");
+        tenantId = requireText(
+                tenantId,
+                "tenantId"
+        );
+
+        missionId = requireText(
+                missionId,
+                "missionId"
+        );
 
         long afterId = resolveCursorId(
                 tenantId,
@@ -168,7 +202,8 @@ public final class PostgresRuntimeEventStore
             String missionId,
             String resumeToken
     ) {
-        String normalized = normalize(resumeToken);
+        String normalized =
+                normalize(resumeToken);
 
         if (normalized.isEmpty()) {
             return 0L;
@@ -188,11 +223,12 @@ public final class PostgresRuntimeEventStore
                 );
     }
 
-    private MissionProgressEvent requireIdempotentEvent(
-            MissionProgressEvent requested,
+    private MissionStreamEvent requireIdempotentEvent(
+            MissionStreamEvent requested,
             RuntimeEventEntity entity
     ) {
-        MissionProgressEvent existing = mapper.toDomain(entity);
+        MissionStreamEvent existing =
+                mapper.toDomain(entity);
 
         if (!existing.equals(requested)) {
             throw new IllegalStateException(
@@ -210,6 +246,7 @@ public final class PostgresRuntimeEventStore
 
         private final String tenantId;
         private final String missionId;
+
         private final AtomicBoolean closed =
                 new AtomicBoolean(false);
 
@@ -229,7 +266,7 @@ public final class PostgresRuntimeEventStore
         }
 
         @Override
-        public Optional<MissionProgressEvent> next(
+        public Optional<MissionStreamEvent> next(
                 Duration waitTimeout
         ) {
             Objects.requireNonNull(
@@ -247,26 +284,38 @@ public final class PostgresRuntimeEventStore
                 return Optional.empty();
             }
 
-            long timeoutNanos = waitTimeout.toNanos();
-            long deadline = System.nanoTime() + timeoutNanos;
+            long timeoutNanos =
+                    waitTimeout.toNanos();
+
+            long deadline =
+                    System.nanoTime() + timeoutNanos;
 
             while (!closed.get()) {
+
                 Optional<RuntimeEventEntity> next =
                         repository
                                 .findByTenantIdAndMissionIdAndIdGreaterThanOrderByIdAsc(
                                         tenantId,
                                         missionId,
                                         cursorId,
-                                        PageRequest.of(0, 1)
+                                        PageRequest.of(
+                                                0,
+                                                1
+                                        )
                                 )
                                 .stream()
                                 .findFirst();
 
                 if (next.isPresent()) {
-                    RuntimeEventEntity entity = next.get();
 
-                    cursorId = entity.getId();
-                    resumeToken = entity.getResumeToken();
+                    RuntimeEventEntity entity =
+                            next.get();
+
+                    cursorId =
+                            entity.getId();
+
+                    resumeToken =
+                            entity.getResumeToken();
 
                     return Optional.of(
                             mapper.toDomain(entity)
@@ -315,7 +364,8 @@ public final class PostgresRuntimeEventStore
             String value,
             String field
     ) {
-        String normalized = normalize(value);
+        String normalized =
+                normalize(value);
 
         if (normalized.isEmpty()) {
             throw new IllegalArgumentException(
@@ -326,7 +376,11 @@ public final class PostgresRuntimeEventStore
         return normalized;
     }
 
-    private static String normalize(String value) {
-        return value == null ? "" : value.trim();
+    private static String normalize(
+            String value
+    ) {
+        return value == null
+                ? ""
+                : value.trim();
     }
 }

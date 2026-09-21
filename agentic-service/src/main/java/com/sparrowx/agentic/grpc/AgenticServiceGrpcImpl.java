@@ -5,16 +5,15 @@ import buildingblocks.core.queries.QueryBus;
 import com.sparrowx.agentic.config.SecurityConfig.CallerIdentityProvider;
 import com.sparrowx.agentic.config.SecurityConfig.ReviewerAuthorizationPolicy;
 import com.sparrowx.agentic.features.streammissionprogress.MissionEventCursor;
-import com.sparrowx.agentic.features.streammissionprogress.MissionProgressEventView;
 import com.sparrowx.agentic.mappers.AgenticMapper;
 import com.sparrowx.agentic.mappers.MissionEventGrpcMapper;
+import com.sparrowx.agentic.mission.model.MissionStreamEvent;
 import com.sparrowx.agentic.proto.AgenticServiceGrpc;
 import com.sparrowx.agentic.proto.ApproveMissionGateRequest;
 import com.sparrowx.agentic.proto.ApproveMissionGateResponse;
 import com.sparrowx.agentic.proto.CancelMissionRequest;
 import com.sparrowx.agentic.proto.CancelMissionResponse;
 import com.sparrowx.agentic.proto.GetMissionResultRequest;
-import com.sparrowx.agentic.proto.MissionProgressEvent;
 import com.sparrowx.agentic.proto.MissionResultResponse;
 import com.sparrowx.agentic.proto.RejectMissionGateRequest;
 import com.sparrowx.agentic.proto.RejectMissionGateResponse;
@@ -58,26 +57,32 @@ public final class AgenticServiceGrpcImpl
                 commandBus,
                 "commandBus must not be null"
         );
+
         this.queryBus = Objects.requireNonNull(
                 queryBus,
                 "queryBus must not be null"
         );
+
         this.agenticMapper = Objects.requireNonNull(
                 agenticMapper,
                 "agenticMapper must not be null"
         );
+
         this.eventMapper = Objects.requireNonNull(
                 eventMapper,
                 "eventMapper must not be null"
         );
+
         this.exceptionHandler = Objects.requireNonNull(
                 exceptionHandler,
                 "exceptionHandler must not be null"
         );
+
         this.reviewerPolicy = Objects.requireNonNull(
                 reviewerPolicy,
                 "reviewerPolicy must not be null"
         );
+
         this.identityProvider = Objects.requireNonNull(
                 identityProvider,
                 "identityProvider must not be null"
@@ -96,6 +101,7 @@ public final class AgenticServiceGrpcImpl
                         + request.getContext().getTraceId()
                         + "]"
         );
+
         unary(
                 responseObserver,
                 () -> agenticMapper.toSubmitMissionResponse(
@@ -111,7 +117,8 @@ public final class AgenticServiceGrpcImpl
     @Override
     public void streamMissionProgress(
             StreamMissionProgressRequest request,
-            StreamObserver<MissionProgressEvent> responseObserver
+            StreamObserver<com.sparrowx.agentic.proto.MissionStreamEvent>
+                    responseObserver
     ) {
         final MissionEventCursor cursor;
 
@@ -127,15 +134,19 @@ public final class AgenticServiceGrpcImpl
                             throwable
                     )
             );
+
             return;
         }
 
         AtomicBoolean responseFinished =
                 new AtomicBoolean(false);
 
-        ServerCallStreamObserver<MissionProgressEvent>
-                serverObserver =
-                asServerObserver(responseObserver);
+        ServerCallStreamObserver<
+                com.sparrowx.agentic.proto.MissionStreamEvent
+                > serverObserver =
+                asServerObserver(
+                        responseObserver
+                );
 
         if (serverObserver != null) {
             serverObserver.setOnCancelHandler(
@@ -145,7 +156,7 @@ public final class AgenticServiceGrpcImpl
 
         Thread.ofVirtual()
                 .name(
-                        "agentic-progress-"
+                        "agentic-stream-"
                                 + normalizeThreadName(
                                 request.getMissionId()
                         )
@@ -248,20 +259,26 @@ public final class AgenticServiceGrpcImpl
 
     private void streamCursor(
             MissionEventCursor cursor,
-            ServerCallStreamObserver<MissionProgressEvent>
-                    serverObserver,
-            StreamObserver<MissionProgressEvent>
-                    responseObserver,
+            ServerCallStreamObserver<
+                    com.sparrowx.agentic.proto.MissionStreamEvent
+                    > serverObserver,
+            StreamObserver<
+                    com.sparrowx.agentic.proto.MissionStreamEvent
+                    > responseObserver,
             AtomicBoolean responseFinished
     ) {
         try (cursor) {
+
             while (!cursor.closed()
                     && !isCancelled(serverObserver)) {
 
-                Optional<MissionProgressEventView> next =
-                        cursor.next(STREAM_WAIT);
+                Optional<MissionStreamEvent> next =
+                        cursor.next(
+                                STREAM_WAIT
+                        );
 
                 if (next.isPresent()) {
+
                     responseObserver.onNext(
                             eventMapper.toProto(
                                     next.orElseThrow()
@@ -270,11 +287,13 @@ public final class AgenticServiceGrpcImpl
                 }
 
                 if (cursor.terminal()) {
+
                     complete(
                             responseObserver,
                             responseFinished,
                             serverObserver
                     );
+
                     return;
                 }
             }
@@ -284,12 +303,15 @@ public final class AgenticServiceGrpcImpl
                     responseFinished,
                     serverObserver
             );
+
         } catch (Throwable throwable) {
+
             if (!isCancelled(serverObserver)
                     && responseFinished.compareAndSet(
                     false,
                     true
             )) {
+
                 responseObserver.onError(
                         exceptionHandler
                                 .toStatusRuntimeException(
@@ -308,20 +330,24 @@ public final class AgenticServiceGrpcImpl
                 responseObserver,
                 "responseObserver must not be null"
         );
+
         Objects.requireNonNull(
                 invocation,
                 "invocation must not be null"
         );
 
         try {
-            T response = Objects.requireNonNull(
-                    invocation.invoke(),
-                    "RPC handler returned null"
-            );
+            T response =
+                    Objects.requireNonNull(
+                            invocation.invoke(),
+                            "RPC handler returned null"
+                    );
 
             responseObserver.onNext(response);
             responseObserver.onCompleted();
+
         } catch (Throwable throwable) {
+
             responseObserver.onError(
                     exceptionHandler
                             .toStatusRuntimeException(
@@ -332,11 +358,13 @@ public final class AgenticServiceGrpcImpl
     }
 
     private static void complete(
-            StreamObserver<MissionProgressEvent>
-                    responseObserver,
+            StreamObserver<
+                    com.sparrowx.agentic.proto.MissionStreamEvent
+                    > responseObserver,
             AtomicBoolean responseFinished,
-            ServerCallStreamObserver<MissionProgressEvent>
-                    serverObserver
+            ServerCallStreamObserver<
+                    com.sparrowx.agentic.proto.MissionStreamEvent
+                    > serverObserver
     ) {
         if (!isCancelled(serverObserver)
                 && responseFinished.compareAndSet(
@@ -355,15 +383,19 @@ public final class AgenticServiceGrpcImpl
     }
 
     @SuppressWarnings("unchecked")
-    private static ServerCallStreamObserver<MissionProgressEvent>
-    asServerObserver(
-            StreamObserver<MissionProgressEvent> observer
+    private static ServerCallStreamObserver<
+            com.sparrowx.agentic.proto.MissionStreamEvent
+            > asServerObserver(
+            StreamObserver<
+                    com.sparrowx.agentic.proto.MissionStreamEvent
+                    > observer
     ) {
         if (observer
                 instanceof ServerCallStreamObserver<?> server) {
 
-            return (ServerCallStreamObserver<MissionProgressEvent>)
-                    server;
+            return (ServerCallStreamObserver<
+                    com.sparrowx.agentic.proto.MissionStreamEvent
+                    >) server;
         }
 
         return null;

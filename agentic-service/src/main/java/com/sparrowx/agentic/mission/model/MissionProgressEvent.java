@@ -7,7 +7,8 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Durable public progress event stored for replay and stream resumption.
+ * Durable public mission progress event stored for replay and stream
+ * resumption.
  */
 public record MissionProgressEvent(
         String missionId,
@@ -23,20 +24,34 @@ public record MissionProgressEvent(
         String resumeToken,
         Instant emittedAt,
         Map<String, String> metadata
-) {
+) implements MissionStreamEvent {
 
     public MissionProgressEvent {
         missionId = nullToEmpty(missionId);
-        status = status == null ? MissionStatus.UNSPECIFIED : status;
+        status = status == null
+                ? MissionStatus.UNSPECIFIED
+                : status;
+
         stageId = nullToEmpty(stageId);
         stageName = nullToEmpty(stageName);
         stepId = nullToEmpty(stepId);
         stepName = nullToEmpty(stepName);
-        stepStatus = stepStatus == null ? StepStatus.UNSPECIFIED : stepStatus;
+
+        stepStatus = stepStatus == null
+                ? StepStatus.UNSPECIFIED
+                : stepStatus;
+
         message = nullToEmpty(message);
         resumeToken = nullToEmpty(resumeToken);
-        emittedAt = Objects.requireNonNull(emittedAt, "emittedAt");
-        metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+
+        emittedAt = Objects.requireNonNull(
+                emittedAt,
+                "emittedAt"
+        );
+
+        metadata = metadata == null
+                ? Map.of()
+                : Map.copyOf(metadata);
     }
 
     private static String nullToEmpty(String value) {
