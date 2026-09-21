@@ -6,10 +6,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
 
 import java.util.LinkedHashSet;
 import java.util.Objects;
 import java.util.Set;
+
+import static org.springframework.security.config.Customizer.withDefaults;
 
 /**
  * Configures tenant isolation and human-review authorization.
@@ -56,6 +60,29 @@ public final class SecurityConfig {
                 );
             }
         };
+    }
+
+    @Bean
+    public SecurityFilterChain httpSecurityFilterChain(
+            HttpSecurity http
+    ) throws Exception {
+
+        http
+                .csrf(csrf -> csrf
+                        .ignoringRequestMatchers("/api/assistant/**")
+                )
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers(
+                                "/api/assistant/**"
+                        )
+                        .permitAll()
+                        .anyRequest()
+                        .authenticated()
+                )
+                .httpBasic(withDefaults())
+                .formLogin(withDefaults());
+
+        return http.build();
     }
 
     @Bean
