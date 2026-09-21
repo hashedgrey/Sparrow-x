@@ -7,7 +7,6 @@ import com.sparrowx.agentic.actions.synthesis.BuildCitationsAction;
 import com.sparrowx.agentic.components.PlanningComponent.Observation;
 import com.sparrowx.agentic.mission.evidence.Citation;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
-import com.sparrowx.agentic.mission.evidence.EvidenceRegistry;
 import com.sparrowx.agentic.planning.MissionIntent;
 import com.sparrowx.agentic.planning.MissionPlan;
 import com.sparrowx.agentic.planning.PlannedStep;
@@ -106,18 +105,19 @@ public final class DefaultMissionEvidenceService
 
             PlannedStep executableStep = hydrateDependencyArguments(step, completedResults);
             StepResult result;
+
             if (shouldSkipUnresolvedGraphStep(executableStep)) {
                 result = skippedGraphStep(executableStep);
+
+            } else if (shouldSkipNoDocumentEvidenceStep(executableStep, completedResults)) {
+
+                result = skippedNoDocumentEvidenceStep(executableStep);
+
             } else {
                 validateGraphRootResolved(executableStep);
-                result = executeStep(input, executableStep, completedResults);            }
-            System.out.printf(
-                    ">>> STEP RESULT id=[%s] kind=[%s] attrs=%s warnings=%s%n",
-                    step.stepId(),
-                    step.kind(),
-                    result.attributes(),
-                    result.warnings()
-            );
+
+                result = executeStep(input, executableStep, completedResults);
+            }
 
             observations.add(new Observation(
                     step.stepId(),
@@ -143,7 +143,32 @@ public final class DefaultMissionEvidenceService
 
         List<EvidenceRef> evidenceRefs = List.copyOf(collectedEvidence.values());
 
+        /*
+         * Citation generation is deterministic post-processing.
+         *
+         * The planner decides which evidence capabilities to execute.
+         * It should not be responsible for remembering to add a
+         * BUILD_CITATIONS step merely to satisfy the mission result contract.
+         *
+         * If a plan explicitly executed BUILD_CITATIONS, keep those citations.
+         * Otherwise, build them from the final collected evidence set whenever
+         * citations are required by the mission.
+         */
+        if (citations.isEmpty() && !evidenceRefs.isEmpty() && input.request().constraints().requireCitations()) {
 
+            BuildCitationsAction.Result citationResult =
+                    citationsAction.execute(
+                            new BuildCitationsAction.BuildSpec(evidenceRefs, excerptsByEvidenceId(evidenceRefs))
+                    );
+
+            citations = citationResult.citations();
+            /*
+             * Use the registry-normalized evidence returned by
+             * BuildCitationsAction so citation.evidenceId always refers to
+             * the exact EvidenceRef included in MissionEvidence.
+             */
+            evidenceRefs = citationResult.evidenceRefs();
+        }
 
         return new MissionEvidence(
                 observations,
@@ -154,11 +179,6 @@ public final class DefaultMissionEvidenceService
                 excerptsByEvidenceId(evidenceRefs)
         );
 
-    }
-
-    private static String excerpt(EvidenceRef ref) {
-        Object value = ref.attributes().get("excerpt");
-        return value == null ? "" : String.valueOf(value).trim();
     }
 
     private static boolean shouldSkipUnresolvedGraphStep(PlannedStep step) {
@@ -197,6 +217,74 @@ public final class DefaultMissionEvidenceService
                         "capability", step.capability(),
                         "skipped", true,
                         "reason", "UNRESOLVED_GRAPH_ROOT"
+                )
+        );
+    }
+
+    private static boolean shouldSkipNoDocumentEvidenceStep(
+            PlannedStep step,
+            Map<String, StepResult> completedResults
+    ) {
+
+        if (step.kind()
+                != StepKind.VERIFY_DOCUMENT_EVIDENCE
+                && step.kind()
+                != StepKind.BUILD_CITATIONS) {
+
+            return false;
+        }
+
+        if (step.dependencyStepIds().isEmpty()) {
+            return false;
+        }
+
+        return step.dependencyStepIds()
+                .stream()
+                .map(completedResults::get)
+                .filter(Objects::nonNull)
+                .anyMatch(result ->
+                        Boolean.TRUE.equals(
+                                result.attributes()
+                                        .get(
+                                                "noRelevantEvidence"
+                                        )
+                        )
+                );
+    }
+
+    private static StepResult skippedNoDocumentEvidenceStep(
+            PlannedStep step
+    ) {
+
+        String summary =
+                switch (step.kind()) {
+
+                    case VERIFY_DOCUMENT_EVIDENCE ->
+                            "Skipped document verification because no relevant document evidence was found";
+
+                    case BUILD_CITATIONS ->
+                            "Skipped citation generation because no relevant document evidence was found";
+
+                    default ->
+                            "Skipped step because no relevant document evidence was found";
+                };
+
+        return new StepResult(
+                summary,
+                List.of(),
+                List.of(),
+                Map.of(
+                        "capability",
+                        step.capability(),
+
+                        "skipped",
+                        true,
+
+                        "reason",
+                        "NO_RELEVANT_DOCUMENT_EVIDENCE",
+
+                        "noRelevantEvidence",
+                        true
                 )
         );
     }
@@ -394,20 +482,15 @@ public final class DefaultMissionEvidenceService
 
         for (String dependencyStepId : step.dependencyStepIds()) {
 
-            StepResult dependencyResult =
-                    completedResults.get(dependencyStepId);
+            StepResult dependencyResult = completedResults.get(dependencyStepId);
 
             if (dependencyResult == null) {
                 continue;
             }
 
-            Object resolvedEntityId =
-                    dependencyResult.attributes()
-                            .get("resolvedEntityId");
+            Object resolvedEntityId = dependencyResult.attributes().get("resolvedEntityId");
 
-            Object resolvedNodeType =
-                    dependencyResult.attributes()
-                            .get("resolvedNodeType");
+            Object resolvedNodeType = dependencyResult.attributes().get("resolvedNodeType");
 
             if (!(resolvedEntityId instanceof String entityId)
                     || entityId.isBlank()) {
@@ -423,10 +506,7 @@ public final class DefaultMissionEvidenceService
             arguments.remove("entity_id");
             arguments.remove("root_entity_id");
 
-            arguments.put(
-                    "rootNodeType",
-                    resolvedNodeType
-            );
+            arguments.put("rootNodeType", resolvedNodeType);
 
             arguments.remove("root_node_type");
 
@@ -504,22 +584,86 @@ public final class DefaultMissionEvidenceService
             MissionRunInput input,
             PlannedStep step
     ) {
+
         BuildSpec spec = buildDocumentSpec(input, step);
 
-        BuildDocumentEvidenceAction.Result result =
-                documentStep.execute(input.request().context(), spec);
+        BuildDocumentEvidenceAction.Result result = documentStep.execute(input.request().context(), spec);
+
+        /*
+         * Retrieval may return fallback/source-supported chunks even when
+         * none of them actually answer the requested evidence intent.
+         *
+         * Those chunks must not become mission evidence merely because
+         * they exist in the document store.
+         */
+        boolean noRelevantEvidence = result.coverageScore() <= 0.0d || result.evidenceRefs().isEmpty();
+
+        if (noRelevantEvidence) {
+
+            return new StepResult(
+                    "No relevant document evidence found for the requested intent",
+
+                    /*
+                     * Critical:
+                     * do not propagate unrelated retrieved chunks.
+                     */
+                    List.of(),
+
+                    /*
+                     * Keep only a concise mission-level warning.
+                     * Do not forward all retrieval/policy diagnostics
+                     * into synthesis.
+                     */
+                    List.of(
+                            "No relevant document evidence matched the requested intent."
+                    ),
+
+                    Map.of(
+                            "coverageScore", result.coverageScore(),
+                            "usedChunkRetrieval", result.usedChunkRetrieval(),
+                            "usedClaimCache", result.usedClaimCache(),
+                            "noRelevantEvidence", true
+                    ),
+
+                    /*
+                     * Critical:
+                     * do not expose the irrelevant evidence graph to a
+                     * later verification step.
+                     */
+                    null,
+
+                    List.of(),
+
+                    Set.of()
+            );
+        }
 
         return new StepResult(
-                "Built document evidence; coverage=" + result.coverageScore(),
+                "Built document evidence; coverage="
+                        + result.coverageScore(),
+
                 result.evidenceRefs(),
+
                 result.warnings(),
+
                 Map.of(
-                        "coverageScore", result.coverageScore(),
-                        "usedChunkRetrieval", result.usedChunkRetrieval(),
-                        "usedClaimCache", result.usedClaimCache()
+                        "coverageScore",
+                        result.coverageScore(),
+
+                        "usedChunkRetrieval",
+                        result.usedChunkRetrieval(),
+
+                        "usedClaimCache",
+                        result.usedClaimCache(),
+
+                        "noRelevantEvidence",
+                        false
                 ),
+
                 result.graph(),
+
                 List.of(),
+
                 Set.of()
         );
     }
@@ -542,12 +686,7 @@ public final class DefaultMissionEvidenceService
                         "evidence_goal"
                 );
 
-        String customGoal =
-                stringArgument(
-                        arguments,
-                        "customGoal",
-                        "custom_goal"
-                );
+        String customGoal = stringArgument(arguments, "customGoal", "custom_goal");
 
         if (goal == null
                 || goal == EvidenceGoalProto.EVIDENCE_GOAL_UNSPECIFIED
@@ -563,9 +702,7 @@ public final class DefaultMissionEvidenceService
         }
         Map<String, Object> spec = new LinkedHashMap<>();
 
-        spec.put(
-                "requestId",
-                effectId(input, step)
+        spec.put("requestId", effectId(input, step)
         );
 
         spec.put("goal", goal);
