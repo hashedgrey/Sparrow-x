@@ -8,8 +8,6 @@
   <em> Agent-Powered Company Intelligence.</em>
 </h3>
 
----
-
 <p>🔁 Runtime Traffic Flow</p>
 
 ![Sparrowx Data Flow](resources/sp-architecture-flow.gif)
