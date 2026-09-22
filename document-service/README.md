@@ -316,7 +316,7 @@ The service uses:
 * Qdrant
 * Neo4j
 * Drivine
-* Gemini
+* Arrow
 * Embabel Agent RAG
 * DICE
 * Apache Tika
