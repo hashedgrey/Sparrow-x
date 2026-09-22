@@ -26,9 +26,19 @@ import java.util.Objects;
 public class DiceDocumentEnricher {
 
     private static final Logger logger =
-            LoggerFactory.getLogger(
-                    DiceDocumentEnricher.class
-            );
+            LoggerFactory.getLogger(DiceDocumentEnricher.class);
+
+    /*
+     * Temporary local policy.
+     *
+     * 25% means:
+     *   6 chunks -> 1 failed chunk allowed
+     *   4 chunks -> 1 failed chunk allowed
+     *   3 chunks -> 0 failed chunks allowed
+     *
+     * We should move this into DiceIngestionProperties next.
+     */
+    private static final double MAX_FAILED_CHUNK_RATIO = 0.25d;
 
     private final PropositionPipeline propositionPipeline;
     private final PropositionRepository propositionRepository;
@@ -49,19 +59,46 @@ public class DiceDocumentEnricher {
             Relations relations
     ) {
         this.propositionPipeline =
-                Objects.requireNonNull(propositionPipeline, "propositionPipeline must not be null");
+                Objects.requireNonNull(
+                        propositionPipeline,
+                        "propositionPipeline must not be null"
+                );
+
         this.propositionRepository =
-                Objects.requireNonNull(propositionRepository, "propositionRepository must not be null");
+                Objects.requireNonNull(
+                        propositionRepository,
+                        "propositionRepository must not be null"
+                );
+
         this.namedEntityDataRepository =
-                Objects.requireNonNull(namedEntityDataRepository, "namedEntityDataRepository must not be null");
+                Objects.requireNonNull(
+                        namedEntityDataRepository,
+                        "namedEntityDataRepository must not be null"
+                );
+
         this.graphProjectionService =
-                Objects.requireNonNull(graphProjectionService, "graphProjectionService must not be null");
+                Objects.requireNonNull(
+                        graphProjectionService,
+                        "graphProjectionService must not be null"
+                );
+
         this.dataDictionary =
-                Objects.requireNonNull(dataDictionary, "dataDictionary must not be null");
+                Objects.requireNonNull(
+                        dataDictionary,
+                        "dataDictionary must not be null"
+                );
+
         this.entityResolver =
-                Objects.requireNonNull(entityResolver, "entityResolver must not be null");
+                Objects.requireNonNull(
+                        entityResolver,
+                        "entityResolver must not be null"
+                );
+
         this.relations =
-                Objects.requireNonNull(relations, "relations must not be null");
+                Objects.requireNonNull(
+                        relations,
+                        "relations must not be null"
+                );
     }
 
     public DiceEnrichmentResult enrich(
@@ -72,12 +109,20 @@ public class DiceDocumentEnricher {
     ) {
         requireNonBlank(tenantId, "tenantId");
 
-        Objects.requireNonNull(documentId, "documentId must not be null");
+        Objects.requireNonNull(
+                documentId,
+                "documentId must not be null"
+        );
 
-        Objects.requireNonNull(fileName, "fileName must not be null");
+        Objects.requireNonNull(
+                fileName,
+                "fileName must not be null"
+        );
 
         if (chunks == null || chunks.isEmpty()) {
-            throw new IllegalArgumentException("chunks must not be empty");
+            throw new IllegalArgumentException(
+                    "chunks must not be empty"
+            );
         }
 
         logger.info(
@@ -118,43 +163,96 @@ public class DiceDocumentEnricher {
                         context
                 );
 
+        List<String> failedChunkIds =
+                results.getFailedChunkIds();
+
+        int totalChunkCount =
+                chunks.size();
+
+        int failedChunkCount =
+                failedChunkIds.size();
+
+        int successfulChunkCount =
+                totalChunkCount - failedChunkCount;
+
+        double failedChunkRatio =
+                (double) failedChunkCount
+                        / (double) totalChunkCount;
+
         /*
-         * PropositionPipeline intentionally isolates individual chunk
-         * failures. SparrowX uses stricter synchronous ingestion semantics:
-         * any failed semantic chunk means the document does not become READY.
+         * DICE deliberately isolates per-chunk failures.
+         *
+         * SparrowX should preserve that benefit rather than converting
+         * every isolated failure back into an all-or-nothing document
+         * failure.
+         *
+         * Fail the enrichment when:
+         *
+         *   1. no semantic chunk succeeded, or
+         *   2. too much of the document failed extraction.
+         *
+         * Otherwise persist the valid DICE output and report the
+         * enrichment as partial.
          */
-        if (!results.getFailedChunkIds().isEmpty()) {
+        if (successfulChunkCount <= 0
+                || failedChunkRatio > MAX_FAILED_CHUNK_RATIO) {
+
             throw new IllegalStateException(
-                    "DICE proposition extraction failed for document "
+                    "DICE proposition extraction exceeded failure threshold "
+                            + "for document "
                             + documentId.value()
-                            + " on chunks "
-                            + results.getFailedChunkIds()
+                            + ". failedChunks="
+                            + failedChunkCount
+                            + "/"
+                            + totalChunkCount
+                            + ", failedChunkIds="
+                            + failedChunkIds
+            );
+        }
+
+        if (failedChunkCount > 0) {
+            logger.warn(
+                    "Continuing DICE enrichment with partial extraction "
+                            + "tenantId={} documentId={} "
+                            + "successfulChunks={} failedChunks={} totalChunks={} "
+                            + "failedChunkRatio={} failedChunkIds={}",
+                    tenantId,
+                    documentId.value(),
+                    successfulChunkCount,
+                    failedChunkCount,
+                    totalChunkCount,
+                    failedChunkRatio,
+                    failedChunkIds
             );
         }
 
         /*
-         * The DICE pipeline returns unsaved results.
+         * PropositionPipeline returns unsaved results.
          *
-         * Persist now while the ingestion job is still running.
-         *
-         * This stores:
-         *   propositions
-         *   resolved/new entities
-         *   proposition/entity structural relationships
-         *   grounding relationships
+         * Failed chunks contain no successful extraction result, while
+         * propositions/entities produced by successful chunks remain
+         * available here.
          */
-        repairMissingUpdatedEntities(results, namedEntityDataRepository);
-        results.persist(propositionRepository, namedEntityDataRepository);
-
-        var graphResult = graphProjectionService.projectAndPersist(
-                results.propositionsToPersist()
+        repairMissingUpdatedEntities(
+                results,
+                namedEntityDataRepository
         );
 
+        results.persist(
+                propositionRepository,
+                namedEntityDataRepository
+        );
 
+        var graphResult =
+                graphProjectionService.projectAndPersist(
+                        results.propositionsToPersist()
+                );
 
-        var projectionResults = graphResult.getFirst();
+        var projectionResults =
+                graphResult.getFirst();
 
-        var relationshipPersistence = graphResult.getSecond();
+        var relationshipPersistence =
+                graphResult.getSecond();
 
         if (relationshipPersistence.getFailedCount() > 0) {
             throw new IllegalStateException(
@@ -165,9 +263,10 @@ public class DiceDocumentEnricher {
             );
         }
 
-        int relationshipCount = projectionResults
-                .getProjected()
-                .size();
+        int relationshipCount =
+                projectionResults
+                        .getProjected()
+                        .size();
 
         DiceEnrichmentResult enrichmentResult =
                 new DiceEnrichmentResult(
@@ -175,18 +274,27 @@ public class DiceDocumentEnricher {
                         results.getFullyResolvedCount(),
                         results.getPartiallyResolvedCount(),
                         results.getUnresolvedCount(),
-                        relationshipCount
+                        relationshipCount,
+                        totalChunkCount,
+                        failedChunkCount
                 );
 
         logger.info(
-                "Completed DICE enrichment tenantId={} documentId={} propositions={} relationships={} fullyResolved={} partiallyResolved={} unresolved={}",
+                "Completed DICE enrichment "
+                        + "tenantId={} documentId={} "
+                        + "propositions={} relationships={} "
+                        + "fullyResolved={} partiallyResolved={} unresolved={} "
+                        + "chunks={} failedChunks={} partial={}",
                 tenantId,
                 documentId.value(),
                 enrichmentResult.propositionCount(),
                 enrichmentResult.relationshipCount(),
                 enrichmentResult.fullyResolvedCount(),
                 enrichmentResult.partiallyResolvedCount(),
-                enrichmentResult.unresolvedCount()
+                enrichmentResult.unresolvedCount(),
+                enrichmentResult.totalChunkCount(),
+                enrichmentResult.failedChunkCount(),
+                enrichmentResult.partial()
         );
 
         return enrichmentResult;
@@ -200,15 +308,18 @@ public class DiceDocumentEnricher {
 
         for (var entity : results.updatedEntities()) {
 
-            if (namedEntityDataRepository.findById(entity.getId()) != null) {
+            if (namedEntityDataRepository.findById(
+                    entity.getId()
+            ) != null) {
                 continue;
             }
 
             missing++;
 
             logger.warn(
-                    "DICE classified entity as existing but repository no longer contains it; " +
-                            "materializing before strict persist entityId={} name={}",
+                    "DICE classified entity as existing but repository "
+                            + "no longer contains it; materializing before "
+                            + "strict persist entityId={} name={}",
                     entity.getId(),
                     entity.getName()
             );
@@ -216,15 +327,17 @@ public class DiceDocumentEnricher {
             /*
              * NamedEntityDataRepository.save() is an upsert.
              *
-             * DICE PersistablePropositions.persist() will subsequently call
-             * update(entity). Pre-materializing the missing entity here allows
+             * DICE PersistablePropositions.persist() subsequently calls
+             * update(entity). Pre-materializing the missing entity allows
              * that strict update to retain its normal semantics.
              */
             namedEntityDataRepository.save(entity);
         }
 
         logger.info(
-                "DICE entity persistence preflight newEntities={} updatedEntities={} missingUpdatedEntities={}",
+                "DICE entity persistence preflight "
+                        + "newEntities={} updatedEntities={} "
+                        + "missingUpdatedEntities={}",
                 results.newEntities().size(),
                 results.updatedEntities().size(),
                 missing
@@ -247,7 +360,17 @@ public class DiceDocumentEnricher {
             int fullyResolvedCount,
             int partiallyResolvedCount,
             int unresolvedCount,
-            int relationshipCount
+            int relationshipCount,
+            int totalChunkCount,
+            int failedChunkCount
     ) {
+
+        public int successfulChunkCount() {
+            return totalChunkCount - failedChunkCount;
+        }
+
+        public boolean partial() {
+            return failedChunkCount > 0;
+        }
     }
 }

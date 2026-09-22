@@ -23,13 +23,10 @@ import org.springframework.transaction.PlatformTransactionManager;
 @Configuration(proxyBeanMethods = false)
 @EnableDrivine
 @EnableDrivinePropertiesConfig
-@EnableConfigurationProperties(
-        GraphRagServiceProperties.class
-)
+@EnableConfigurationProperties(GraphRagServiceProperties.class)
 public class DiceGraphConfiguration {
 
-    private static final String GRAPH_DATASOURCE =
-            "graph";
+    private static final String GRAPH_DATASOURCE = "graph";
 
     @Bean("drivineTransactionManager")
     @Primary
@@ -42,7 +39,7 @@ public class DiceGraphConfiguration {
     }
 
     @Bean(GRAPH_DATASOURCE)
-    public PersistenceManager diceGraphPersistenceManager(
+    public PersistenceManager graphPersistenceManager(
             PersistenceManagerFactory persistenceManagerFactory
     ) {
         return persistenceManagerFactory.get(
@@ -51,7 +48,7 @@ public class DiceGraphConfiguration {
     }
 
     @Bean
-    public GraphObjectManager diceGraphObjectManager(
+    public GraphObjectManager graphObjectManager(
             GraphObjectManagerFactory graphObjectManagerFactory
     ) {
         return graphObjectManagerFactory.get(
@@ -61,21 +58,21 @@ public class DiceGraphConfiguration {
 
     @Bean
     @Primary
-    public NamedEntityDataRepository diceNamedEntityDataRepository(
+    public NamedEntityDataRepository namedEntityDataRepository(
             @Qualifier(GRAPH_DATASOURCE)
             PersistenceManager persistenceManager,
-            GraphObjectManager diceGraphObjectManager,
+            GraphObjectManager graphObjectManager,
             GraphRagServiceProperties graphRagServiceProperties,
             @Qualifier("diceDataDictionary")
-            DataDictionary diceDataDictionary,
+            DataDictionary dataDictionary,
             Ai ai
     ) {
         return new DrivineNamedEntityDataRepository(
                 persistenceManager,
                 graphRagServiceProperties,
-                diceDataDictionary,
+                dataDictionary,
                 ai.withDefaultEmbeddingService(),
-                diceGraphObjectManager
+                graphObjectManager
         );
     }
 }

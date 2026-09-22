@@ -6,18 +6,23 @@ import com.embabel.agent.rag.service.NamedEntityDataRepository;
 import com.embabel.common.ai.model.LlmOptions;
 import com.embabel.dice.common.EntityResolver;
 import com.embabel.dice.common.Relations;
-import com.embabel.dice.common.SchemaAdherence;
 import com.embabel.dice.common.resolver.EscalatingEntityResolver;
 import com.embabel.dice.pipeline.BatchedExtractionStrategy;
 import com.embabel.dice.pipeline.ExtractionExecutionStrategy;
 import com.embabel.dice.pipeline.PropositionPipeline;
-import com.embabel.dice.projection.graph.*;
+import com.embabel.dice.projection.graph.GraphProjectionService;
+import com.embabel.dice.projection.graph.GraphProjector;
+import com.embabel.dice.projection.graph.GraphRelationshipPersister;
+import com.embabel.dice.projection.graph.NamedEntityDataRepositoryGraphRelationshipPersister;
+import com.embabel.dice.projection.graph.RelationBasedGraphProjector;
 import com.embabel.dice.projection.lineage.ProjectionRecordStore;
 import com.embabel.dice.projection.lineage.RepositoryBackedReconciler;
 import com.embabel.dice.proposition.PropositionRepository;
 import com.embabel.dice.proposition.extraction.LlmPropositionExtractor;
+import com.sparrowx.document.config.DiceIngestionProperties;
 import com.sparrowx.document.observability.ContextPropagatingExecutorService;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -26,16 +31,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @Configuration
+@EnableConfigurationProperties(
+        DiceIngestionProperties.class
+)
 public class DiceIngestionConfiguration {
 
     @Bean
     public DataDictionary diceDataDictionary() {
-        /*
-         * Document Service is domain-generic.
-         *
-         * Entity types are discovered from uploaded company documents rather
-         * than constrained to a fixed Java domain model.
-         */
+
         return DataDictionary.fromDomainTypes(
                 "sparrowx-document",
                 Collections.emptyList()
@@ -46,44 +49,84 @@ public class DiceIngestionConfiguration {
             name = "diceExtractionExecutor",
             destroyMethod = "shutdown"
     )
-    public ExecutorService diceExtractionExecutor() {
+    public ExecutorService diceExtractionExecutor(
+            DiceIngestionProperties properties
+    ) {
         return new ContextPropagatingExecutorService(
-                Executors.newFixedThreadPool(4)
+                Executors.newFixedThreadPool(
+                        properties.extractionThreads()
+                )
         );
     }
 
     @Bean(destroyMethod = "close")
     public BatchedExtractionStrategy diceExtractionExecutionStrategy(
             @Qualifier("diceExtractionExecutor")
-            ExecutorService diceExtractionExecutor
+            ExecutorService diceExtractionExecutor,
+            DiceIngestionProperties properties
     ) {
         return new BatchedExtractionStrategy(
-                4,
+                properties.extractionBatchSize(),
                 diceExtractionExecutor
         );
     }
+
     @Bean
     public Relations diceRelations() {
-        /*
-         * Initial graph relationship vocabulary for engineering/company
-         * documents.
-         *
-         * These are DICE relations, not SparrowX custom edge classes.
-         */
+
         return Relations.empty()
-                .withSemantic("depends on", "one entity depends on another")
-                .withSemantic("part of", "one entity is a component or member of another")
-                .withSemantic("uses", "one entity uses another")
-                .withSemantic("requires", "one entity requires another")
-                .withSemantic("implements", "one entity implements another concept, interface, process or requirement")
-                .withSemantic("owns", "one entity owns or is responsible for another")
-                .withSemantic("produces", "one entity produces another")
-                .withSemantic("causes", "one entity causes or contributes to another")
-                .withSemantic("mitigates", "one entity mitigates or reduces another")
-                .withSemantic("references", "one entity references or points to another")
-                .withSemantic("runs on", "one entity runs or executes on another")
-                .withSemantic("related to", "the entities have a meaningful relationship not covered by a more specific relation")
-                .withSemantic("contains", "one entity contains another as a component, member, field, variable or subpart");
+                .withSemantic(
+                        "depends on",
+                        "one entity depends on another"
+                )
+                .withSemantic(
+                        "part of",
+                        "one entity is a component or member of another"
+                )
+                .withSemantic(
+                        "uses",
+                        "one entity uses another"
+                )
+                .withSemantic(
+                        "requires",
+                        "one entity requires another"
+                )
+                .withSemantic(
+                        "implements",
+                        "one entity implements another concept, interface, process or requirement"
+                )
+                .withSemantic(
+                        "owns",
+                        "one entity owns or is responsible for another"
+                )
+                .withSemantic(
+                        "produces",
+                        "one entity produces another"
+                )
+                .withSemantic(
+                        "causes",
+                        "one entity causes or contributes to another"
+                )
+                .withSemantic(
+                        "mitigates",
+                        "one entity mitigates or reduces another"
+                )
+                .withSemantic(
+                        "references",
+                        "one entity references or points to another"
+                )
+                .withSemantic(
+                        "runs on",
+                        "one entity runs or executes on another"
+                )
+                .withSemantic(
+                        "related to",
+                        "the entities have a meaningful relationship not covered by a more specific relation"
+                )
+                .withSemantic(
+                        "contains",
+                        "one entity contains another as a component, member, field, variable or subpart"
+                );
     }
 
     @Bean
@@ -99,15 +142,27 @@ public class DiceIngestionConfiguration {
     @Bean
     public LlmPropositionExtractor dicePropositionExtractor(
             Ai ai,
-            PropositionRepository propositionRepository
+            PropositionRepository propositionRepository,
+            DiceIngestionProperties properties
     ) {
-        return LlmPropositionExtractor.withLlm(
-                LlmOptions.withDefaultLlm())
+
+        return LlmPropositionExtractor
+                .withLlm(
+                        LlmOptions.withDefaultLlm()
+                )
                 .withAi(ai)
-                .withSchemaAdherence(SchemaAdherence.RELAXED)
-                .withTemplate("extract_propositions")
-                .withPropositionRepository(propositionRepository)
-                .withExistingPropositionsToShow(25);
+                .withSchemaAdherence(
+                        properties.schemaAdherence()
+                )
+                .withTemplate(
+                        "extract_propositions"
+                )
+                .withPropositionRepository(
+                        propositionRepository
+                )
+                .withExistingPropositionsToShow(
+                        properties.existingPropositionsToShow()
+                );
     }
 
     @Bean
@@ -115,53 +170,44 @@ public class DiceIngestionConfiguration {
             LlmPropositionExtractor dicePropositionExtractor,
             ExtractionExecutionStrategy diceExtractionExecutionStrategy
     ) {
+
         return PropositionPipeline
-                .withExtractor(dicePropositionExtractor)
+                .withExtractor(
+                        dicePropositionExtractor
+                )
                 .withExecutionStrategy(
                         diceExtractionExecutionStrategy
                 );
     }
 
-    @Bean(name = "diceGraphProjectionExecutor", destroyMethod = "shutdown")
-    public ExecutorService diceGraphProjectionExecutor() {
-        return new ContextPropagatingExecutorService(
-                Executors.newFixedThreadPool(4)
-        );
-    }
+    /*
+     * Graph projection is deliberately deterministic.
+     *
+     * Proposition extraction is the semantic/LLM-heavy stage.
+     *
+     * Do not send every unmatched proposition through another LLM call.
+     * RelationBasedGraphProjector matches the proposition text against
+     * SparrowX's known relation vocabulary and skips relationships for
+     * which no deterministic predicate exists.
+     *
+     * This removes the promote-relationship LLM amplification that was
+     * causing a six-page document to generate many additional LLM calls.
+     */
     @Bean
     public GraphProjector diceGraphProjector(
-            Ai ai,
-            Relations diceRelations,
-            @Qualifier("diceGraphProjectionExecutor")
-            ExecutorService diceGraphProjectionExecutor
+            Relations diceRelations
     ) {
-        GraphProjector deterministic =
-                RelationBasedGraphProjector
-                        .from(diceRelations)
-                        .withLenientPolicy();
 
-        GraphProjector llm =
-                LlmGraphProjector.withLlm(LlmOptions.withDefaultLlm()).withAi(ai)
-                        .withRelations(diceRelations)
-                        .withLenientPolicy();
-
-        GraphProjector boundedLlm =
-                new BoundedParallelGraphProjector(
-                        llm,
-                        diceGraphProjectionExecutor,
-                        4
-                );
-
-        return new HybridGraphProjector(
-                deterministic,
-                boundedLlm
-        );
+        return RelationBasedGraphProjector
+                .from(diceRelations)
+                .withLenientPolicy();
     }
 
     @Bean
     public GraphRelationshipPersister diceGraphRelationshipPersister(
             NamedEntityDataRepository namedEntityDataRepository
     ) {
+
         return new NamedEntityDataRepositoryGraphRelationshipPersister(
                 namedEntityDataRepository
         );
@@ -176,6 +222,7 @@ public class DiceIngestionConfiguration {
             ProjectionRecordStore projectionRecordStore,
             NamedEntityDataRepository namedEntityDataRepository
     ) {
+
         return GraphProjectionService.create(
                 diceGraphProjector,
                 diceGraphRelationshipPersister,
