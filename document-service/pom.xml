@@ -24,7 +24,7 @@
 
         <minio.version>8.5.17</minio.version>
         <tika.version>3.2.0</tika.version>
-        <embabel-agent.version>1.5.0-SNAPSHOT</embabel-agent.version>
+        <embabel-agent.version>1.5.0</embabel-agent.version>
         <dice.version>0.2.0-SNAPSHOT</dice.version>
         <embabel-rag-graph.version>0.3.0-SNAPSHOT</embabel-rag-graph.version>
         <drivine.version>0.0.79</drivine.version>
@@ -33,16 +33,39 @@
     </properties>
 
     <repositories>
+
+        <repository>
+            <id>embabel-releases</id>
+            <url>https://repo.embabel.com/artifactory/libs-release</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+
         <repository>
             <id>embabel-snapshots</id>
             <url>https://repo.embabel.com/artifactory/libs-snapshot</url>
+            <releases>
+                <enabled>false</enabled>
+            </releases>
             <snapshots>
                 <enabled>true</enabled>
                 <updatePolicy>always</updatePolicy>
             </snapshots>
+        </repository>
+
+        <repository>
+            <id>spring-milestones</id>
+            <url>https://repo.spring.io/milestone</url>
             <releases>
-                <enabled>false</enabled>
+                <enabled>true</enabled>
             </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
         </repository>
 
     </repositories>
@@ -129,12 +152,6 @@
             <version>${dice.version}</version>
         </dependency>
 
-        <!-- Gives DICE an Embabel Ai backed by Google GenAI / Gemini -->
-        <dependency>
-            <groupId>com.embabel.agent</groupId>
-            <artifactId>embabel-agent-starter-google-genai</artifactId>
-            <version>${embabel-agent.version}</version>
-        </dependency>
 
         <!-- Durable NamedEntityDataRepository + relationship graph -->
         <dependency>
@@ -158,12 +175,6 @@
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
             <version>${guava.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>com.google.genai</groupId>
-            <artifactId>google-genai</artifactId>
-            <version>1.56.0</version>
         </dependency>
 
         <!-- Internal Building Blocks -->
@@ -288,6 +299,13 @@
             <version>${minio.version}</version>
         </dependency>
 
+        <!-- Embabel platform -->
+        <dependency>
+            <groupId>com.embabel.agent</groupId>
+            <artifactId>embabel-agent-starter</artifactId>
+            <version>${embabel-agent.version}</version>
+        </dependency>
+
         <!-- ElasticSearch -->
         <dependency>
             <groupId>co.elastic.clients</groupId>
@@ -401,5 +419,64 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+
+        <!-- OpenAI -->
+        <profile>
+            <id>models-openai</id>
+
+            <activation>
+                <property>
+                    <name>env.OPENAI_API_KEY</name>
+                </property>
+            </activation>
+
+            <dependencies>
+                <dependency>
+                    <groupId>com.embabel.agent</groupId>
+                    <artifactId>embabel-agent-starter-openai</artifactId>
+                    <version>${embabel-agent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+
+        <profile>
+            <id>models-deepseek</id>
+
+            <activation>
+                <property>
+                    <name>env.DEEPSEEK_API_KEY</name>
+                </property>
+            </activation>
+
+            <dependencies>
+                <dependency>
+                    <groupId>com.embabel.agent</groupId>
+                    <artifactId>embabel-agent-starter-deepseek</artifactId>
+                    <version>${embabel-agent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+        <!-- Google Gemini / Google GenAI native -->
+        <profile>
+            <id>models-google-genai</id>
+
+            <activation>
+                <property>
+                    <name>env.GOOGLE_API_KEY</name>
+                </property>
+            </activation>
+
+            <dependencies>
+                <dependency>
+                    <groupId>com.embabel.agent</groupId>
+                    <artifactId>embabel-agent-starter-google-genai</artifactId>
+                    <version>${embabel-agent.version}</version>
+                </dependency>
+            </dependencies>
+        </profile>
+
+    </profiles>
 
 </project>

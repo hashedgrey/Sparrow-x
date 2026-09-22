@@ -1,8 +1,8 @@
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/postgres
-    username: postgres
-    password: postgres
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/postgres}
+    username: ${POSTGRES_USERNAME:postgres}
+    password: ${POSTGRES_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
 
 
@@ -22,74 +22,67 @@ management:
 
   tracing:
     sampling:
-      probability: 1.0
+      probability: ${TRACING_SAMPLE_PROBABILITY:1.0}
 
   otlp:
     tracing:
-      endpoint: http://localhost:4318/v1/traces
+      endpoint: ${OTEL_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
 
   opentelemetry:
     resource-attributes:
       service.name: document-service
-      service.version: 1.0.0
+      service.version: ${SERVICE_VERSION:1.0.0}
       service.namespace: sparrowx
       deployment.environment: dev
 
 
 sparrowx:
   document:
+
     minio:
-      enabled: true
-      endpoint: http://localhost:9000
-      access-key: minioadmin
-      secret-key: minioadmin
-      bucket-name: sparrowx-documents
+      enabled: ${DOCUMENT_MINIO_ENABLED:true}
+      endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+      access-key: ${MINIO_ACCESS_KEY:minioadmin}
+      secret-key: ${MINIO_SECRET_KEY:minioadmin}
+      bucket-name: ${MINIO_BUCKET:sparrowx-documents}
 
     elasticsearch:
-      enabled: true
-      url: http://localhost:9200
-      index-name: sparrowx-document-chunks
+      enabled: ${DOCUMENT_ELASTICSEARCH_ENABLED:true}
+      url: ${ELASTICSEARCH_URL:http://localhost:9200}
+      index-name: ${DOCUMENT_ELASTICSEARCH_INDEX:sparrowx-document-chunks}
 
     qdrant:
-      enabled: true
-      url: http://localhost:6333
-      collection-name: sparrowx_document_chunks
-      vector-dimension: 768
+      enabled: ${DOCUMENT_QDRANT_ENABLED:true}
+      url: ${QDRANT_URL:http://localhost:6333}
+      collection-name: ${DOCUMENT_QDRANT_COLLECTION:sparrowx_document_chunks}
+      distance: ${DOCUMENT_QDRANT_DISTANCE:Cosine}
 
     embedding:
-      provider: gemini
-      model: gemini-embedding-001
-      dimension: 768
-      api-key: ${GEMINI_API_KEY}
+      provider: ${DOCUMENT_EMBEDDING_ADAPTER:embabel}
+      dimension: ${DOCUMENT_EMBEDDING_DIMENSION:768}
+      validate-dimension: ${DOCUMENT_EMBEDDING_VALIDATE_DIMENSION:true}
+
+    rag:
+      max-chunk-size: ${DOCUMENT_RAG_MAX_CHUNK_SIZE:1200}
+      overlap-size: ${DOCUMENT_RAG_OVERLAP_SIZE:200}
+      embedding-batch-size: ${DOCUMENT_RAG_EMBEDDING_BATCH_SIZE:100}
 
 
 embabel:
   models:
-    # Generative model used by DICE during document ingestion only.
-    default-llm: gemini-3.1-flash-lite-preview
-
-    # Used by Embabel/DICE entity and graph infrastructure.
-    # Independent of SparrowX's existing 768-dimensional
-    # Qdrant embedding configuration above.
-    default-embedding-model: gemini-embedding-001
+    # Independent selections.
+    default-llm: ${DOCUMENT_LLM_MODEL}
+    default-embedding-model: ${DOCUMENT_EMBEDDING_MODEL}
 
   agent:
     platform:
-      # Embabel structured-output/data-binding retries.
-      #
-      # This is the retry layer producing messages such as:
-      # "Retry attempt N of 10 due to: Invalid LLM return..."
       llm-operations:
-        data-binding:
-          max-attempts: 1
-          fixed-backoff-millis: 100
+        prompts:
+          default-timeout: ${DOCUMENT_LLM_DEFAULT_TIMEOUT:120s}
 
-      # Google GenAI provider retries.
-      # Separate from the Embabel data-binding retries above.
-      models:
-        googlegenai:
-          api-key: ${GEMINI_API_KEY}
-          max-attempts: 3
+        data-binding:
+          max-attempts: ${DOCUMENT_LLM_BINDING_ATTEMPTS:1}
+          fixed-backoff-millis: ${DOCUMENT_LLM_BINDING_BACKOFF_MS:1000}
 
     rag:
       graph:
@@ -97,32 +90,26 @@ embabel:
         username: ${NEO4J_USERNAME:neo4j}
         password: ${NEO4J_PASSWORD:password}
 
-        content-element-index: embabel_content_index
-        entity-index: embabel_entity_index
+        content-element-index: ${DOCUMENT_GRAPH_CONTENT_INDEX:embabel_content_index}
+        entity-index: ${DOCUMENT_GRAPH_ENTITY_INDEX:embabel_entity_index}
 
-        content-element-full-text-index: embabel_content_fulltext_index
-        entity-full-text-index: embabel_entity_fulltext_index
+        content-element-full-text-index: ${DOCUMENT_GRAPH_CONTENT_FT_INDEX:embabel_content_fulltext_index}
+        entity-full-text-index: ${DOCUMENT_GRAPH_ENTITY_FT_INDEX:embabel_entity_fulltext_index}
 
-        chunk-node-name: Chunk
-        entity-node-name: Entity
+        chunk-node-name: ${DOCUMENT_GRAPH_CHUNK_NODE:Chunk}
+        entity-node-name: ${DOCUMENT_GRAPH_ENTITY_NODE:Entity}
 
-        max-chunk-size: 1500
-        overlap-size: 200
+        max-chunk-size: ${DOCUMENT_RAG_MAX_CHUNK_SIZE:1200}
+        overlap-size: ${DOCUMENT_RAG_OVERLAP_SIZE:200}
 
   dice:
     store:
-      # Persist propositions and DICE graph state in Neo4j.
       type: graph
 
-      # Do not age document knowledge automatically.
       decay:
         enabled: false
 
 
-# Drivine datasource used by:
-# - DICE durable PropositionRepository
-# - Embabel NamedEntityDataRepository
-# - DICE/Embabel graph projection
 database:
   datasources:
     graph:
