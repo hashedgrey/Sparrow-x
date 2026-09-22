@@ -11,7 +11,9 @@ import org.springframework.scheduling.annotation.EnableScheduling;
         IngestionWorkerProperties.class,
         MinioConfig.class,
         ElasticsearchConfig.ElasticsearchProperties.class,
-        QdrantProperties.class
+        QdrantProperties.class,
+        EmbeddingConfig.EmbeddingProperties.class,
+        DiceIngestionProperties.class
 })
 public class DocumentServiceConfiguration {
 }

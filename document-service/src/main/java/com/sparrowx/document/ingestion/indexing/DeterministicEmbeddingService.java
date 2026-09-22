@@ -1,5 +1,6 @@
 package com.sparrowx.document.ingestion.indexing;
 
+import com.sparrowx.document.config.EmbeddingConfig;
 import com.sparrowx.document.exceptions.DocumentIndexingException;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -15,12 +16,17 @@ import java.util.List;
 @ConditionalOnProperty(
         prefix = "sparrowx.document.embedding",
         name = "provider",
-        havingValue = "deterministic",
-        matchIfMissing = true
+        havingValue = "deterministic"
 )
 public class DeterministicEmbeddingService implements EmbeddingService {
 
-    private static final int VECTOR_DIMENSION = 384;
+    private final EmbeddingConfig.EmbeddingProperties properties;
+
+    public DeterministicEmbeddingService(
+            EmbeddingConfig.EmbeddingProperties properties
+    ) {
+        this.properties = properties;
+    }
 
     @Override
     public List<Float> embedDocument(String text) {
@@ -44,21 +50,33 @@ public class DeterministicEmbeddingService implements EmbeddingService {
     }
 
     private List<Float> embed(String text) {
+
         if (text == null || text.isBlank()) {
-            return zeroVector();
+            throw new DocumentIndexingException(
+                    "Cannot embed blank text",
+                    null
+            );
         }
 
         try {
-            List<Float> vector = new ArrayList<>(VECTOR_DIMENSION);
+            int dimension = properties.dimension();
+
+            List<Float> vector = new ArrayList<>(dimension);
+
             String seed = sha256(text);
 
-            for (int i = 0; i < VECTOR_DIMENSION; i++) {
+            for (int i = 0; i < dimension; i++) {
                 int charIndex = i % seed.length();
-                int value = Character.digit(seed.charAt(charIndex), 16);
+                int value = Character.digit(
+                        seed.charAt(charIndex),
+                        16
+                );
+
                 vector.add(value / 15.0f);
             }
 
-            return vector;
+            return List.copyOf(vector);
+
         } catch (RuntimeException exception) {
             throw new DocumentIndexingException(
                     "Failed to create deterministic placeholder embedding",
@@ -67,21 +85,17 @@ public class DeterministicEmbeddingService implements EmbeddingService {
         }
     }
 
-    private List<Float> zeroVector() {
-        List<Float> vector = new ArrayList<>(VECTOR_DIMENSION);
-
-        for (int i = 0; i < VECTOR_DIMENSION; i++) {
-            vector.add(0.0f);
-        }
-
-        return vector;
-    }
-
     private String sha256(String text) {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(text.getBytes(StandardCharsets.UTF_8));
+            MessageDigest digest =
+                    MessageDigest.getInstance("SHA-256");
+
+            byte[] hash = digest.digest(
+                    text.getBytes(StandardCharsets.UTF_8)
+            );
+
             return HexFormat.of().formatHex(hash);
+
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException(
                     "SHA-256 algorithm is not available",

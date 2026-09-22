@@ -8,7 +8,9 @@ public interface EmbeddingService {
 
     List<Float> embedQuery(String text);
 
-    default List<List<Float>> embedDocuments(List<String> texts) {
+    default List<List<Float>> embedDocuments(
+            List<String> texts
+    ) {
         if (texts == null || texts.isEmpty()) {
             return List.of();
         }
