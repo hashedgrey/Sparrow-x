@@ -7,25 +7,24 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "sparrowx.document.qdrant")
 public class QdrantProperties {
 
-    private String collectionName = "sparrowx_document_chunks";
-    private String url = "http://localhost:6333";
-    private int vectorDimension = 384;
     private boolean enabled = false;
+    private String url = "http://localhost:6333";
+    private String collectionName = "sparrowx_document_chunks";
+    private String distance = "Cosine";
 
-    public String collectionName() {
-        return collectionName;
+    public boolean enabled() {
+        return enabled;
     }
 
     public String url() {
         return url;
     }
 
-    public int vectorDimension() {
-        return vectorDimension;
+    public String collectionName() {
+        return collectionName;
     }
 
-    public boolean enabled() {
-        return enabled;
+    public String distance() {
+        return distance;
     }
-
 }

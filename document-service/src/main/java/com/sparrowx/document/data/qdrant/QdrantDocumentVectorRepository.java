@@ -84,10 +84,7 @@ public class QdrantDocumentVectorRepository {
                 throw exception;
             }
 
-            throw new RetrievalFailedException(
-                    "Qdrant vector retrieval failed",
-                    exception
-            );
+            throw new RetrievalFailedException("Qdrant vector retrieval failed", exception);
         }
     }
 

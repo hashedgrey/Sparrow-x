@@ -1,5 +1,6 @@
 package com.sparrowx.document.data.qdrant;
 
+import com.sparrowx.document.config.EmbeddingConfig;
 import com.sparrowx.document.config.QdrantProperties;
 import com.sparrowx.document.domain.valueobjects.*;
 import com.sparrowx.document.exceptions.DocumentIndexingException;
@@ -15,14 +16,16 @@ import java.util.*;
 public class QdrantChunkIndexer {
 
     private final QdrantProperties properties;
+    private final EmbeddingConfig.EmbeddingProperties embeddingProperties;
     private final RestTemplate qdrantRestTemplate;
-
 
     public QdrantChunkIndexer(
             QdrantProperties properties,
+            EmbeddingConfig.EmbeddingProperties embeddingProperties,
             RestTemplate qdrantRestTemplate
     ) {
         this.properties = properties;
+        this.embeddingProperties = embeddingProperties;
         this.qdrantRestTemplate = qdrantRestTemplate;
     }
 
@@ -61,26 +64,43 @@ public class QdrantChunkIndexer {
                     new LinkedHashMap<>();
 
             payload.put("tenant_id", tenantId.value());
+
             payload.put(
                     "project_id",
-                    projectId == null ? "" : projectId.value()
+                    projectId == null
+                            ? ""
+                            : projectId.value()
             );
+
             payload.put(
                     "team_id",
-                    teamId == null ? "" : teamId.value()
+                    teamId == null
+                            ? ""
+                            : teamId.value()
             );
-            payload.put("document_id", documentId.value());
-            payload.put("chunk_id", chunkId.value());
+
+            payload.put(
+                    "document_id",
+                    documentId.value()
+            );
+
+            payload.put(
+                    "chunk_id",
+                    chunkId.value()
+            );
+
             payload.put("text", text);
             payload.put("chunk_index", chunkIndex);
             payload.put("page_start", pageStart);
             payload.put("page_end", pageEnd);
+
             payload.put(
                     "metadata",
                     metadata == null
                             ? Map.<String, String>of()
                             : Map.copyOf(metadata)
             );
+
             payload.put(
                     "indexed_at",
                     Instant.now().toString()
@@ -93,6 +113,7 @@ public class QdrantChunkIndexer {
                     "id",
                     stablePointId(chunkId.value())
             );
+
             point.put("vector", vector);
             point.put("payload", payload);
 
@@ -110,6 +131,11 @@ public class QdrantChunkIndexer {
             );
 
         } catch (RuntimeException exception) {
+
+            if (exception instanceof DocumentIndexingException) {
+                throw exception;
+            }
+
             throw new DocumentIndexingException(
                     "Failed to index chunk into Qdrant: chunkId="
                             + chunkId.value(),
@@ -118,12 +144,20 @@ public class QdrantChunkIndexer {
         }
     }
 
-    private String stablePointId(String chunkId) {
+    private String stablePointId(
+            String chunkId
+    ) {
         try {
-            return UUID.fromString(chunkId).toString();
+            return UUID.fromString(
+                    chunkId
+            ).toString();
+
         } catch (IllegalArgumentException ignored) {
+
             return UUID.nameUUIDFromBytes(
-                    chunkId.getBytes(StandardCharsets.UTF_8)
+                    chunkId.getBytes(
+                            StandardCharsets.UTF_8
+                    )
             ).toString();
         }
     }
@@ -135,24 +169,43 @@ public class QdrantChunkIndexer {
             String text,
             List<Float> vector
     ) {
-        Objects.requireNonNull(tenantId, "tenantId must not be null");
-        Objects.requireNonNull(documentId, "documentId must not be null");
-        Objects.requireNonNull(chunkId, "chunkId must not be null");
+        Objects.requireNonNull(
+                tenantId,
+                "tenantId must not be null"
+        );
+
+        Objects.requireNonNull(
+                documentId,
+                "documentId must not be null"
+        );
+
+        Objects.requireNonNull(
+                chunkId,
+                "chunkId must not be null"
+        );
 
         if (text == null || text.isBlank()) {
-            throw InvalidDocumentException.blankField("text");
+            throw InvalidDocumentException.blankField(
+                    "text"
+            );
         }
 
         if (vector == null || vector.isEmpty()) {
-            throw InvalidDocumentException.blankField("vector");
+            throw InvalidDocumentException.blankField(
+                    "vector"
+            );
         }
 
-        if (vector.size() != properties.vectorDimension()) {
+        if (embeddingProperties.validateDimension()
+                && vector.size()
+                != embeddingProperties.dimension()) {
+
             throw new DocumentIndexingException(
                     "Qdrant vector dimension mismatch. expected="
-                            + properties.vectorDimension()
+                            + embeddingProperties.dimension()
                             + ", actual="
-                            + vector.size()
+                            + vector.size(),
+                    null
             );
         }
     }

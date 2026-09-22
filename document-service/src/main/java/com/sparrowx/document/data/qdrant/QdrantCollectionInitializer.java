@@ -1,5 +1,6 @@
 package com.sparrowx.document.data.qdrant;
 
+import com.sparrowx.document.config.EmbeddingConfig;
 import com.sparrowx.document.config.QdrantProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,61 +20,187 @@ public class QdrantCollectionInitializer {
 
     @Bean
     ApplicationRunner ensureQdrantCollection(
-            QdrantProperties properties,
+            QdrantProperties qdrantProperties,
+            EmbeddingConfig.EmbeddingProperties embeddingProperties,
             RestTemplate qdrantRestTemplate
     ) {
         return args -> {
-            if (!properties.enabled()) {
-                log.info("Qdrant is disabled. Skipping collection initialization.");
+
+            if (!qdrantProperties.enabled()) {
+                log.info(
+                        "Qdrant is disabled. Skipping collection initialization."
+                );
                 return;
             }
 
-            String collectionUrl = properties.url()
-                    + "/collections/"
-                    + properties.collectionName();
+            int expectedDimension =
+                    embeddingProperties.dimension();
 
-            if (collectionExists(collectionUrl, qdrantRestTemplate)) {
-                log.info(
-                        "Qdrant collection already exists: {}",
-                        properties.collectionName()
+            String collectionUrl =
+                    qdrantProperties.url()
+                            + "/collections/"
+                            + qdrantProperties.collectionName();
+
+            Map<?, ?> existingCollection =
+                    getCollection(
+                            collectionUrl,
+                            qdrantRestTemplate
+                    );
+
+            if (existingCollection != null) {
+
+                verifyExistingCollection(
+                        existingCollection,
+                        expectedDimension,
+                        qdrantProperties.collectionName()
                 );
+
+                log.info(
+                        "Qdrant collection ready: {} dimension={}",
+                        qdrantProperties.collectionName(),
+                        expectedDimension
+                );
+
                 return;
             }
 
             Map<String, Object> body = Map.of(
-                    "vectors", Map.of(
-                            "size", properties.vectorDimension(),
-                            "distance", "Cosine"
+                    "vectors",
+                    Map.of(
+                            "size", expectedDimension,
+                            "distance", qdrantProperties.distance()
                     )
             );
 
             try {
-                qdrantRestTemplate.put(collectionUrl, body);
+
+                qdrantRestTemplate.put(
+                        collectionUrl,
+                        body
+                );
 
                 log.info(
-                        "Created Qdrant collection: {} with vector dimension {}",
-                        properties.collectionName(),
-                        properties.vectorDimension()
+                        "Created Qdrant collection: {} dimension={} distance={}",
+                        qdrantProperties.collectionName(),
+                        expectedDimension,
+                        qdrantProperties.distance()
                 );
-            } catch (HttpClientErrorException.Conflict ex) {
-                // Another app instance or previous startup may have created it.
+
+            } catch (HttpClientErrorException.Conflict exception) {
+
+                /*
+                 * Another service instance may have created the
+                 * collection between our existence check and PUT.
+                 *
+                 * Fetch it again and verify that it is compatible.
+                 */
+                Map<?, ?> createdCollection =
+                        getCollection(
+                                collectionUrl,
+                                qdrantRestTemplate
+                        );
+
+                if (createdCollection == null) {
+                    throw exception;
+                }
+
+                verifyExistingCollection(
+                        createdCollection,
+                        expectedDimension,
+                        qdrantProperties.collectionName()
+                );
+
                 log.info(
-                        "Qdrant collection already exists after create attempt: {}",
-                        properties.collectionName()
+                        "Qdrant collection already existed after create attempt: {}",
+                        qdrantProperties.collectionName()
                 );
             }
         };
     }
 
-    private boolean collectionExists(
+    private Map<?, ?> getCollection(
             String collectionUrl,
             RestTemplate qdrantRestTemplate
     ) {
         try {
-            qdrantRestTemplate.getForObject(collectionUrl, Map.class);
-            return true;
-        } catch (HttpClientErrorException.NotFound ex) {
-            return false;
+
+            return qdrantRestTemplate.getForObject(
+                    collectionUrl,
+                    Map.class
+            );
+
+        } catch (HttpClientErrorException.NotFound exception) {
+            return null;
         }
+    }
+
+    private void verifyExistingCollection(
+            Map<?, ?> response,
+            int expectedDimension,
+            String collectionName
+    ) {
+
+        Integer actualDimension =
+                extractVectorDimension(response);
+
+        if (actualDimension == null) {
+
+            log.warn(
+                    "Unable to determine vector dimension for existing Qdrant collection: {}",
+                    collectionName
+            );
+
+            return;
+        }
+
+        if (actualDimension != expectedDimension) {
+
+            throw new IllegalStateException(
+                    "Qdrant collection '"
+                            + collectionName
+                            + "' uses vector dimension "
+                            + actualDimension
+                            + " but the configured embedding dimension is "
+                            + expectedDimension
+                            + ". Use a compatible embedding model or reindex into a new collection."
+            );
+        }
+    }
+
+    private Integer extractVectorDimension(
+            Map<?, ?> response
+    ) {
+
+        Object resultObject = response.get("result");
+
+        if (!(resultObject instanceof Map<?, ?> result)) {
+            return null;
+        }
+
+        Object configObject = result.get("config");
+
+        if (!(configObject instanceof Map<?, ?> config)) {
+            return null;
+        }
+
+        Object paramsObject = config.get("params");
+
+        if (!(paramsObject instanceof Map<?, ?> params)) {
+            return null;
+        }
+
+        Object vectorsObject = params.get("vectors");
+
+        if (!(vectorsObject instanceof Map<?, ?> vectors)) {
+            return null;
+        }
+
+        Object sizeObject = vectors.get("size");
+
+        if (!(sizeObject instanceof Number size)) {
+            return null;
+        }
+
+        return size.intValue();
     }
 }
