@@ -27,16 +27,26 @@ public class QdrantDocumentChunkIndexer {
         validate(request);
 
         try {
-            List<DocumentChunkDraft> chunks = request.chunks();
+            List<DocumentChunkDraft> chunks =
+                    request.chunks();
 
             if (chunks.isEmpty()) {
                 return 0;
             }
 
-            int indexed = 0;
+            List<String> texts = chunks.stream()
+                    .map(DocumentChunkDraft::text)
+                    .toList();
 
-            for (DocumentChunkDraft chunk : chunks) {
-                List<Float> vector = embeddingService.embedDocument(chunk.text());
+            List<List<Float>> vectors = embeddingService.embedDocuments(texts);
+
+            validateEmbeddingResult(chunks, vectors);
+
+            for (int i = 0; i < chunks.size(); i++) {
+
+                DocumentChunkDraft chunk = chunks.get(i);
+
+                List<Float> vector = vectors.get(i);
 
                 qdrantChunkIndexer.indexChunk(
                         request.tenantId(),
@@ -51,17 +61,14 @@ public class QdrantDocumentChunkIndexer {
                         chunk.pageEnd(),
                         chunk.metadata()
                 );
-
-                indexed++;
             }
 
-            return indexed;
+            return chunks.size();
+
+        } catch (DocumentIndexingException exception) {
+            throw exception;
 
         } catch (RuntimeException exception) {
-            if (exception instanceof DocumentIndexingException) {
-                throw exception;
-            }
-
             throw new DocumentIndexingException(
                     "Failed to index chunks into Qdrant for documentId="
                             + request.documentId().value(),
@@ -70,9 +77,44 @@ public class QdrantDocumentChunkIndexer {
         }
     }
 
+    private void validateEmbeddingResult(
+            List<DocumentChunkDraft> chunks,
+            List<List<Float>> vectors
+    ) {
+
+        if (vectors == null) {
+            throw new DocumentIndexingException("Embedding service returned null", null);
+        }
+
+        if (vectors.size() != chunks.size()) {
+            throw new DocumentIndexingException(
+                    "Embedding result count mismatch. Expected "
+                            + chunks.size()
+                            + " vectors but received "
+                            + vectors.size(),
+                    null
+            );
+        }
+
+        for (int i = 0; i < vectors.size(); i++) {
+            List<Float> vector = vectors.get(i);
+
+            if (vector == null || vector.isEmpty()) {
+                throw new DocumentIndexingException(
+                        "Embedding service returned an empty vector for chunk index "
+                                + i,
+                        null
+                );
+            }
+        }
+    }
+
     private void validate(DocumentChunkIndexRequest request) {
+
         if (request == null) {
-            throw InvalidDocumentException.nullCommand("DocumentChunkIndexRequest");
+            throw InvalidDocumentException.nullCommand(
+                    "DocumentChunkIndexRequest"
+            );
         }
 
         Objects.requireNonNull(request.tenantId(), "tenantId must not be null");
