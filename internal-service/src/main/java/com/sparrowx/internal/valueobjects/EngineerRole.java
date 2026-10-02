@@ -1,22 +1,34 @@
 package com.sparrowx.internal.valueobjects;
 
+import java.util.Locale;
+
 public enum EngineerRole {
-    LEARNER,
+
+    INTERN,
+    JUNIOR_ENGINEER,
     ENGINEER,
-    AGENTIC_ENGINEER,
-    ADMIN;
+    SENIOR_ENGINEER,
+    STAFF_ENGINEER;
 
     public static EngineerRole from(String value) {
         if (value == null || value.isBlank()) {
-            return LEARNER;
+            return INTERN;
         }
 
-        return switch (value.trim().toUpperCase()) {
-            case "ENGINEER_ROLE_LEARNER", "LEARNER" -> LEARNER;
-            case "ENGINEER_ROLE_ENGINEER", "ENGINEER" -> ENGINEER;
-            case "ENGINEER_ROLE_AGENTIC_ENGINEER", "AGENTIC_ENGINEER" -> AGENTIC_ENGINEER;
-            case "ENGINEER_ROLE_ADMIN", "ADMIN" -> ADMIN;
-            default -> LEARNER;
-        };
+        String normalized = value
+                .trim()
+                .toUpperCase(Locale.ROOT);
+
+        if (normalized.startsWith("ENGINEER_ROLE_")) {
+            normalized = normalized.substring(
+                    "ENGINEER_ROLE_".length()
+            );
+        }
+
+        try {
+            return EngineerRole.valueOf(normalized);
+        } catch (IllegalArgumentException exception) {
+            return INTERN;
+        }
     }
 }

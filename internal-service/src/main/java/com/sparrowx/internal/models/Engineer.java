@@ -34,7 +34,7 @@ public record Engineer(
         }
 
         if (role == null) {
-            role = EngineerRole.LEARNER;
+            role = EngineerRole.INTERN;
         }
 
         if (createdAt == null) {
