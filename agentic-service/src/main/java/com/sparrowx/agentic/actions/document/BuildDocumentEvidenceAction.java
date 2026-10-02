@@ -1,6 +1,5 @@
 package com.sparrowx.agentic.actions.document;
 
-import com.embabel.agent.api.annotation.Action;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.agentic.tools.document.DocumentEvidenceMapper;
@@ -14,6 +13,11 @@ import com.sparrowx.document.proto.DocumentEvidenceGraphProto;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Deterministic Document Service capability executor.
+ *
+ * Embabel planning happens above this class.
+ */
 public final class BuildDocumentEvidenceAction {
 
     private final DocumentEvidenceRequestBuilder requestBuilder;
@@ -23,35 +27,25 @@ public final class BuildDocumentEvidenceAction {
     public BuildDocumentEvidenceAction(
             DocumentEvidenceRequestBuilder requestBuilder,
             DocumentTool documentTool,
-            DocumentEvidenceMapper evidenceMapper) {
+            DocumentEvidenceMapper evidenceMapper
+    ) {
+        this.requestBuilder = Objects.requireNonNull(requestBuilder, "requestBuilder must not be null"
+        );
 
-        this.requestBuilder = Objects.requireNonNull(
-                requestBuilder,
-                "requestBuilder must not be null");
+        this.documentTool = Objects.requireNonNull(documentTool, "documentTool must not be null"
+        );
 
-        this.documentTool = Objects.requireNonNull(
-                documentTool,
-                "documentTool must not be null");
-
-        this.evidenceMapper = Objects.requireNonNull(
-                evidenceMapper,
-                "evidenceMapper must not be null");
+        this.evidenceMapper = Objects.requireNonNull(evidenceMapper, "evidenceMapper must not be null"
+        );
     }
 
-    @Action
-    public Result execute(
-            MissionContext context,
-            BuildSpec spec) {
-
-        BuildDocumentEvidenceRequest request =
-                requestBuilder.build(context, spec);
-
-        BuildDocumentEvidenceResponse response =
-                documentTool.buildEvidence(context, request);
+    public Result execute(MissionContext context, BuildSpec spec
+    ) {
+        BuildDocumentEvidenceRequest request = requestBuilder.build(context, spec);
+        BuildDocumentEvidenceResponse response = documentTool.buildEvidence(context, request);
 
         if (!response.hasGraph()) {
-            throw new IllegalStateException(
-                    "Document Service returned no evidence graph");
+            throw new IllegalStateException("Document Service returned no evidence graph");
         }
 
         return new Result(
@@ -60,7 +54,8 @@ public final class BuildDocumentEvidenceAction {
                 response.getUsedChunkRetrieval(),
                 response.getUsedClaimCache(),
                 response.getCoverageScore(),
-                response.getWarningsList());
+                response.getWarningsList()
+        );
     }
 
     public record Result(
@@ -69,20 +64,13 @@ public final class BuildDocumentEvidenceAction {
             boolean usedChunkRetrieval,
             boolean usedClaimCache,
             double coverageScore,
-            List<String> warnings) {
+            List<String> warnings
+    ) {
 
         public Result {
-            graph = Objects.requireNonNull(
-                    graph,
-                    "graph must not be null");
-
-            evidenceRefs = evidenceRefs == null
-                    ? List.of()
-                    : List.copyOf(evidenceRefs);
-
-            warnings = warnings == null
-                    ? List.of()
-                    : List.copyOf(warnings);
+            graph = Objects.requireNonNull(graph, "graph must not be null");
+            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
         }
     }
 }

@@ -17,6 +17,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+/**
+ * Validated Internal Service execution boundary.
+ *
+ * Hybrid planning belongs in MissionAgent/Embabel.
+ * This class only executes already-selected internal capabilities.
+ */
 @Component
 public final class ResolveInternalContextStep {
 
@@ -38,20 +44,29 @@ public final class ResolveInternalContextStep {
                 searchAction,
                 "searchAction must not be null"
         );
+
         this.companyGraphAction = Objects.requireNonNull(
                 companyGraphAction,
                 "companyGraphAction must not be null"
         );
+
         this.learningGraphAction = Objects.requireNonNull(
                 learningGraphAction,
                 "learningGraphAction must not be null"
         );
+
         this.responseValidator = Objects.requireNonNull(
                 responseValidator,
                 "responseValidator must not be null"
         );
     }
 
+    /**
+     * Temporary compatibility entrypoint.
+     *
+     * Remove this when DefaultMissionEvidenceService and MissionPlan
+     * are removed.
+     */
     public Result execute(
             MissionContext context,
             Request request
@@ -60,7 +75,6 @@ public final class ResolveInternalContextStep {
         Objects.requireNonNull(request, "request must not be null");
 
         return switch (request.operation()) {
-
             case SEARCH_ENTITIES ->
                     search(
                             context,
@@ -81,10 +95,16 @@ public final class ResolveInternalContextStep {
         };
     }
 
-    private Result search(
+    /**
+     * Direct capability used by the Hybrid planner.
+     */
+    public Result search(
             MissionContext context,
             SearchSpec spec
     ) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(spec, "spec must not be null");
+
         SearchInternalEntitiesAction.Result result =
                 searchAction.execute(context, spec);
 
@@ -107,8 +127,15 @@ public final class ResolveInternalContextStep {
 
         Map<String, Object> attributes = new LinkedHashMap<>();
 
-        attributes.put("candidateCount", result.candidates().size());
-        attributes.put("ambiguous", result.ambiguous());
+        attributes.put(
+                "candidateCount",
+                result.candidates().size()
+        );
+
+        attributes.put(
+                "ambiguous",
+                result.ambiguous()
+        );
 
         if (!result.ambiguous()
                 && !result.candidates().isEmpty()) {
@@ -116,10 +143,25 @@ public final class ResolveInternalContextStep {
             var resolved = result.candidates().getFirst();
 
             if (!resolved.getEntityId().isBlank()) {
-                attributes.put("resolvedEntityId", resolved.getEntityId());
-                attributes.put("resolvedNodeType", resolved.getNodeType().name());
-                attributes.put("resolvedLabel", resolved.getLabel());
-                attributes.put("resolvedScore", resolved.getScore());
+                attributes.put(
+                        "resolvedEntityId",
+                        resolved.getEntityId()
+                );
+
+                attributes.put(
+                        "resolvedNodeType",
+                        resolved.getNodeType().name()
+                );
+
+                attributes.put(
+                        "resolvedLabel",
+                        resolved.getLabel()
+                );
+
+                attributes.put(
+                        "resolvedScore",
+                        resolved.getScore()
+                );
             }
         }
 
@@ -132,15 +174,23 @@ public final class ResolveInternalContextStep {
                 result.warnings(),
                 Map.copyOf(attributes)
         );
-
     }
 
-    private Result readCompanyGraph(
+    /**
+     * Direct capability used by the Hybrid planner after entity resolution.
+     */
+    public Result readCompanyGraph(
             MissionContext context,
             GraphSpec spec
     ) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(spec, "spec must not be null");
+
         ReadInternalCompanyGraphAction.Result result =
-                companyGraphAction.execute(context, spec);
+                companyGraphAction.execute(
+                        context,
+                        spec
+                );
 
         responseValidator.validateInternal(
                 "read-internal-company-graph",
@@ -149,7 +199,8 @@ public final class ResolveInternalContextStep {
                 value -> new ResponseMetadata(
                         context.tenantId(),
                         spec.requestId(),
-                        spec.requestId() + ":company-graph",
+                        spec.requestId()
+                                + ":company-graph",
                         value.evidenceRefs().size(),
                         value.graph().getSerializedSize(),
                         value.evidenceRefs()
@@ -168,12 +219,21 @@ public final class ResolveInternalContextStep {
         );
     }
 
-    private Result readLearningGraph(
+    /**
+     * Direct capability used by the Hybrid planner after entity resolution.
+     */
+    public Result readLearningGraph(
             MissionContext context,
             GraphSpec spec
     ) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(spec, "spec must not be null");
+
         ReadLearningGraphAction.Result result =
-                learningGraphAction.execute(context, spec);
+                learningGraphAction.execute(
+                        context,
+                        spec
+                );
 
         responseValidator.validateInternal(
                 "read-learning-graph",
@@ -182,7 +242,8 @@ public final class ResolveInternalContextStep {
                 value -> new ResponseMetadata(
                         context.tenantId(),
                         spec.requestId(),
-                        spec.requestId() + ":learning-graph",
+                        spec.requestId()
+                                + ":learning-graph",
                         value.evidenceRefs().size(),
                         value.graph().getSerializedSize(),
                         value.evidenceRefs()
@@ -199,59 +260,6 @@ public final class ResolveInternalContextStep {
                         result.graph().getSerializedSize()
                 )
         );
-    }
-
-    /**
-     * Planner/Jackson-facing request.
-     *
-     * GraphInput is intentionally loose. It prevents Jackson from trying to
-     * instantiate the strict GraphSpec when the selected operation is only
-     * SEARCH_ENTITIES.
-     */
-    public record Request(
-            Operation operation,
-            SearchSpec searchSpec,
-            GraphInput graphSpec
-    ) {
-        public Request {
-            operation = Objects.requireNonNull(
-                    operation,
-                    "operation must not be null"
-            );
-
-            if (operation == Operation.SEARCH_ENTITIES
-                    && searchSpec == null) {
-                throw new IllegalArgumentException(
-                        "searchSpec is required for SEARCH_ENTITIES"
-                );
-            }
-
-            if ((operation == Operation.READ_COMPANY_GRAPH
-                    || operation == Operation.READ_LEARNING_GRAPH)
-                    && graphSpec == null) {
-                throw new IllegalArgumentException(
-                        "graphSpec is required for graph operations"
-                );
-            }
-        }
-    }
-
-    /**
-     * Loose structured-output representation.
-     *
-     * Do not perform strict domain validation here. The LLM may populate
-     * irrelevant structured-output branches with null/blank values.
-     *
-     * Strict GraphSpec is constructed only when a graph operation is actually
-     * selected.
-     */
-    public record GraphInput(
-            String requestId,
-            String rootEntityId,
-            InternalGraphNodeType rootNodeType,
-            Integer depth,
-            Integer limit
-    ) {
     }
 
     public record Result(
@@ -283,12 +291,100 @@ public final class ResolveInternalContextStep {
                     ? Map.of()
                     : Map.copyOf(attributes);
         }
+
+        public boolean hasResolvedEntity() {
+            Object entityId =
+                    attributes.get("resolvedEntityId");
+
+            Object nodeType =
+                    attributes.get("resolvedNodeType");
+
+            return entityId instanceof String id
+                    && !id.isBlank()
+                    && nodeType instanceof String type
+                    && !type.isBlank();
+        }
+
+        public String resolvedEntityId() {
+            Object value =
+                    attributes.get("resolvedEntityId");
+
+            return value instanceof String text
+                    ? text
+                    : "";
+        }
+
+        public InternalGraphNodeType resolvedNodeType() {
+            Object value =
+                    attributes.get("resolvedNodeType");
+
+            if (!(value instanceof String text)
+                    || text.isBlank()) {
+                return InternalGraphNodeType
+                        .INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED;
+            }
+
+            try {
+                return InternalGraphNodeType.valueOf(text);
+            } catch (IllegalArgumentException ignored) {
+                return InternalGraphNodeType
+                        .INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED;
+            }
+        }
     }
 
     public enum Operation {
         SEARCH_ENTITIES,
         READ_COMPANY_GRAPH,
         READ_LEARNING_GRAPH
+    }
+
+    /*
+     * ------------------------------------------------------------------
+     * LEGACY PLANNER ADAPTER
+     *
+     * Delete everything below when MissionPlan /
+     * DefaultMissionEvidenceService are removed.
+     * ------------------------------------------------------------------
+     */
+
+    @Deprecated
+    public record Request(
+            Operation operation,
+            SearchSpec searchSpec,
+            GraphInput graphSpec
+    ) {
+        public Request {
+            operation = Objects.requireNonNull(
+                    operation,
+                    "operation must not be null"
+            );
+
+            if (operation == Operation.SEARCH_ENTITIES
+                    && searchSpec == null) {
+                throw new IllegalArgumentException(
+                        "searchSpec is required for SEARCH_ENTITIES"
+                );
+            }
+
+            if ((operation == Operation.READ_COMPANY_GRAPH
+                    || operation == Operation.READ_LEARNING_GRAPH)
+                    && graphSpec == null) {
+                throw new IllegalArgumentException(
+                        "graphSpec is required for graph operations"
+                );
+            }
+        }
+    }
+
+    @Deprecated
+    public record GraphInput(
+            String requestId,
+            String rootEntityId,
+            InternalGraphNodeType rootNodeType,
+            Integer depth,
+            Integer limit
+    ) {
     }
 
     private static SearchSpec requireSearchSpec(
@@ -300,11 +396,6 @@ public final class ResolveInternalContextStep {
         );
     }
 
-    /**
-     * Converts loose LLM/Jackson input into the strict downstream domain type.
-     *
-     * This method is reached only for an actual graph operation.
-     */
     private static GraphSpec toGraphSpec(
             GraphInput input
     ) {

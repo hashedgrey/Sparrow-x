@@ -6,6 +6,5 @@ package com.sparrowx.agentic.mission.model;
 public enum MissionPath {
     UNSPECIFIED,
     FAST,
-    RESEARCH,
-    GOVERNED
+    RESEARCH
 }

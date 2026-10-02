@@ -1,6 +1,5 @@
 package com.sparrowx.agentic.actions.internal;
 
-import com.embabel.agent.api.annotation.Action;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.agentic.tools.internal.InternalContextMapper;
@@ -14,6 +13,11 @@ import com.sparrowx.internal.grpc.SearchInternalEntitiesResponse;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Deterministic Internal Service entity-search executor.
+ *
+ * Embabel planning happens above this class.
+ */
 public final class SearchInternalEntitiesAction {
 
     private final InternalEntitySearchRequestBuilder requestBuilder;
@@ -23,26 +27,28 @@ public final class SearchInternalEntitiesAction {
     public SearchInternalEntitiesAction(
             InternalEntitySearchRequestBuilder requestBuilder,
             InternalContextTool contextTool,
-            InternalContextMapper contextMapper) {
-
+            InternalContextMapper contextMapper
+    ) {
         this.requestBuilder = Objects.requireNonNull(
                 requestBuilder,
-                "requestBuilder must not be null");
+                "requestBuilder must not be null"
+        );
 
         this.contextTool = Objects.requireNonNull(
                 contextTool,
-                "contextTool must not be null");
+                "contextTool must not be null"
+        );
 
         this.contextMapper = Objects.requireNonNull(
                 contextMapper,
-                "contextMapper must not be null");
+                "contextMapper must not be null"
+        );
     }
 
-    @Action
     public Result execute(
             MissionContext context,
-            SearchSpec spec) {
-
+            SearchSpec spec
+    ) {
         SearchInternalEntitiesRequest request =
                 requestBuilder.build(context, spec);
 
@@ -53,14 +59,16 @@ public final class SearchInternalEntitiesAction {
                 response.getResultsList(),
                 contextMapper.fromSearch(response),
                 response.getAmbiguous(),
-                response.getWarningsList());
+                response.getWarningsList()
+        );
     }
 
     public record Result(
             List<InternalEntitySearchResult> candidates,
             List<EvidenceRef> evidenceRefs,
             boolean ambiguous,
-            List<String> warnings) {
+            List<String> warnings
+    ) {
 
         public Result {
             candidates = candidates == null

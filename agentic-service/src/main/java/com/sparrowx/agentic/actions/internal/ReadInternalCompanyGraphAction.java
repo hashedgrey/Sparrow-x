@@ -1,6 +1,5 @@
 package com.sparrowx.agentic.actions.internal;
 
-import com.embabel.agent.api.annotation.Action;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.agentic.tools.internal.InternalContextMapper;
@@ -14,6 +13,11 @@ import com.sparrowx.internal.grpc.ReadInternalCompanyGraphResponse;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Deterministic Internal Service company-graph executor.
+ *
+ * Embabel planning happens above this class.
+ */
 public final class ReadInternalCompanyGraphAction {
 
     private final InternalGraphRequestBuilder requestBuilder;
@@ -23,26 +27,28 @@ public final class ReadInternalCompanyGraphAction {
     public ReadInternalCompanyGraphAction(
             InternalGraphRequestBuilder requestBuilder,
             InternalContextTool contextTool,
-            InternalContextMapper contextMapper) {
-
+            InternalContextMapper contextMapper
+    ) {
         this.requestBuilder = Objects.requireNonNull(
                 requestBuilder,
-                "requestBuilder must not be null");
+                "requestBuilder must not be null"
+        );
 
         this.contextTool = Objects.requireNonNull(
                 contextTool,
-                "contextTool must not be null");
+                "contextTool must not be null"
+        );
 
         this.contextMapper = Objects.requireNonNull(
                 contextMapper,
-                "contextMapper must not be null");
+                "contextMapper must not be null"
+        );
     }
 
-    @Action
     public Result execute(
             MissionContext context,
-            GraphSpec spec) {
-
+            GraphSpec spec
+    ) {
         ReadInternalCompanyGraphRequest request =
                 requestBuilder.buildCompanyGraph(context, spec);
 
@@ -51,22 +57,26 @@ public final class ReadInternalCompanyGraphAction {
 
         if (!response.hasGraph()) {
             throw new IllegalStateException(
-                    "Internal Service returned no company graph");
+                    "Internal Service returned no company graph"
+            );
         }
 
         return new Result(
                 response.getGraph(),
-                contextMapper.fromCompanyGraph(response));
+                contextMapper.fromCompanyGraph(response)
+        );
     }
 
     public record Result(
             InternalGraph graph,
-            List<EvidenceRef> evidenceRefs) {
+            List<EvidenceRef> evidenceRefs
+    ) {
 
         public Result {
             graph = Objects.requireNonNull(
                     graph,
-                    "graph must not be null");
+                    "graph must not be null"
+            );
 
             evidenceRefs = evidenceRefs == null
                     ? List.of()
