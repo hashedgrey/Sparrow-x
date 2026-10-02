@@ -5,14 +5,15 @@ import buildingblocks.shared.context.CorrelationContext;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 @Component
+@ConditionalOnBean(KafkaTemplate.class)
 public class KafkaIntegrationPublisher {
 
-    private static final Logger logger =
-            LoggerFactory.getLogger(KafkaIntegrationPublisher.class);
+    private static final Logger logger = LoggerFactory.getLogger(KafkaIntegrationPublisher.class);
 
     private final KafkaTemplate<String, String> kafkaTemplate;
 
@@ -31,22 +32,11 @@ public class KafkaIntegrationPublisher {
                         message.getPayload()
                 );
 
-        record.headers().add(
-                "event-type",
-                message.getEventType().getBytes()
-        );
-
-        record.headers().add(
-                "message-id",
-                message.getId().toString().getBytes()
-        );
-
+        record.headers().add("event-type", message.getEventType().getBytes());
+        record.headers().add("message-id", message.getId().toString().getBytes());
         String correlationId = CorrelationContext.getCorrelationId();
         if (correlationId != null) {
-            record.headers().add(
-                    "correlation-id",
-                    correlationId.getBytes()
-            );
+            record.headers().add("correlation-id", correlationId.getBytes());
         }
 
         kafkaTemplate.send(record).whenComplete((result, ex) -> {
