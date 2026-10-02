@@ -2,10 +2,10 @@ package buildingblocks.infrastructure.persistence.jpa;
 
 import jakarta.persistence.EntityManagerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.autoconfigure.domain.EntityScan;
-import org.springframework.boot.autoconfigure.orm.jpa.HibernateProperties;
-import org.springframework.boot.autoconfigure.orm.jpa.HibernateSettings;
-import org.springframework.boot.autoconfigure.orm.jpa.JpaProperties;
+import org.springframework.boot.persistence.autoconfigure.EntityScan;
+import org.springframework.boot.jpa.autoconfigure.JpaProperties;
+import org.springframework.boot.hibernate.autoconfigure.HibernateProperties;
+import org.springframework.boot.hibernate.autoconfigure.HibernateSettings;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.domain.AuditorAware;
