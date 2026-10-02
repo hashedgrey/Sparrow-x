@@ -1,24 +1,8 @@
 package com.sparrowx.internal.features.searchinternalentities;
 
 import buildingblocks.core.queries.QueryHandler;
-import com.sparrowx.internal.data.postgres.entities.EngineerEntity;
-import com.sparrowx.internal.data.postgres.entities.InternalDocumentEntity;
-import com.sparrowx.internal.data.postgres.entities.ModuleEntity;
-import com.sparrowx.internal.data.postgres.entities.OnboardingPathEntity;
-import com.sparrowx.internal.data.postgres.entities.OnboardingTaskEntity;
-import com.sparrowx.internal.data.postgres.entities.PermissionEntity;
-import com.sparrowx.internal.data.postgres.entities.RepositoryEntity;
-import com.sparrowx.internal.data.postgres.entities.RunbookEntity;
-import com.sparrowx.internal.data.postgres.entities.TeamEntity;
-import com.sparrowx.internal.data.postgres.repositories.EngineerJpaRepository;
-import com.sparrowx.internal.data.postgres.repositories.InternalDocumentJpaRepository;
-import com.sparrowx.internal.data.postgres.repositories.ModuleJpaRepository;
-import com.sparrowx.internal.data.postgres.repositories.OnboardingPathJpaRepository;
-import com.sparrowx.internal.data.postgres.repositories.OnboardingTaskJpaRepository;
-import com.sparrowx.internal.data.postgres.repositories.PermissionJpaRepository;
-import com.sparrowx.internal.data.postgres.repositories.RepositoryJpaRepository;
-import com.sparrowx.internal.data.postgres.repositories.RunbookJpaRepository;
-import com.sparrowx.internal.data.postgres.repositories.TeamJpaRepository;
+import com.sparrowx.internal.data.postgres.entities.*;
+import com.sparrowx.internal.data.postgres.repositories.*;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -65,7 +49,7 @@ public class SearchInternalEntitiesQueryHandler
     private final EngineerJpaRepository engineerRepository;
     private final PermissionJpaRepository permissionRepository;
     private final SearchInternalEntitiesQueryValidator validator;
-
+    private final EngineerTeamMembershipJpaRepository membershipRepository;
     public SearchInternalEntitiesQueryHandler(
             ModuleJpaRepository moduleRepository,
             TeamJpaRepository teamRepository,
@@ -76,6 +60,7 @@ public class SearchInternalEntitiesQueryHandler
             OnboardingTaskJpaRepository onboardingTaskRepository,
             EngineerJpaRepository engineerRepository,
             PermissionJpaRepository permissionRepository,
+            EngineerTeamMembershipJpaRepository membershipRepository,
             SearchInternalEntitiesQueryValidator validator
     ) {
         this.moduleRepository = moduleRepository;
@@ -87,6 +72,7 @@ public class SearchInternalEntitiesQueryHandler
         this.onboardingTaskRepository = onboardingTaskRepository;
         this.engineerRepository = engineerRepository;
         this.permissionRepository = permissionRepository;
+        this.membershipRepository = membershipRepository;
         this.validator = validator;
     }
 
@@ -161,11 +147,69 @@ public class SearchInternalEntitiesQueryHandler
         }
 
         if (shouldSearch(allowedTypes, TYPE_ENGINEER)) {
-            engineerRepository
-                    .searchByTenantIdAndText(query.tenantId(), searchText)
-                    .forEach(engineer ->
-                            results.add(toResult(engineer, searchText))
+
+            var engineers =
+                    engineerRepository.searchByTenantIdAndText(
+                            query.tenantId(),
+                            searchText
                     );
+
+            if (!engineers.isEmpty()) {
+
+                var engineerIds =
+                        engineers.stream()
+                                .map(EngineerEntity::getEngineerId)
+                                .toList();
+
+                var memberships =
+                        membershipRepository.findActiveMemberships(
+                                query.tenantId(),
+                                engineerIds
+                        );
+
+                var membershipsByEngineer =
+                        memberships.stream()
+                                .collect(
+                                        Collectors.groupingBy(
+                                                EngineerTeamMembershipEntity::getEngineerId
+                                        )
+                                );
+
+                var teamIds =
+                        memberships.stream()
+                                .map(EngineerTeamMembershipEntity::getTeamId)
+                                .collect(Collectors.toSet());
+
+                var teamsById =
+                        teamIds.isEmpty()
+                                ? Map.<String, TeamEntity>of()
+                                : teamRepository
+                                .findAllByTenantIdAndTeamIdIn(
+                                        query.tenantId(),
+                                        teamIds
+                                )
+                                .stream()
+                                .collect(
+                                        Collectors.toMap(
+                                                TeamEntity::getTeamId,
+                                                team -> team
+                                        )
+                                );
+
+                engineers.forEach(
+                        engineer -> results.add(
+                                toResult(
+                                        engineer,
+                                        searchText,
+                                        membershipsByEngineer.getOrDefault(
+                                                engineer.getEngineerId(),
+                                                List.of()
+                                        ),
+                                        teamsById
+                                )
+                        )
+                );
+            }
         }
 
         if (shouldSearch(allowedTypes, TYPE_PERMISSION)) {
@@ -365,8 +409,35 @@ public class SearchInternalEntitiesQueryHandler
 
     private InternalEntitySearchResult toResult(
             EngineerEntity engineer,
-            String query
+            String query,
+            List<EngineerTeamMembershipEntity> memberships,
+            Map<String, TeamEntity> teamsById
     ) {
+
+        var primaryMembership =
+                memberships.stream()
+                        .filter(EngineerTeamMembershipEntity::isPrimary)
+                        .findFirst()
+                        .orElse(null);
+
+        String primaryTeamId =
+                primaryMembership == null ? "" : primaryMembership.getTeamId();
+
+        String teamIds =
+                memberships.stream()
+                        .map(EngineerTeamMembershipEntity::getTeamId)
+                        .distinct()
+                        .collect(Collectors.joining(","));
+
+        String teamNames =
+                memberships.stream()
+                        .map(EngineerTeamMembershipEntity::getTeamId)
+                        .map(teamsById::get)
+                        .filter(team -> team != null)
+                        .map(TeamEntity::getName)
+                        .distinct()
+                        .collect(Collectors.joining(","));
+
         return new InternalEntitySearchResult(
                 engineer.getEngineerId(),
                 TYPE_ENGINEER,
@@ -375,11 +446,14 @@ public class SearchInternalEntitiesQueryHandler
                 engineer.getEmail(),
                 score(query, engineer.getFullName(), engineer.getEmail(), ""),
                 matchReason(query, engineer.getFullName(), engineer.getEmail(), ""),
-                "",
-                "",
+                primaryTeamId,
+                primaryTeamId.isBlank() ? "" : TYPE_TEAM,
                 Map.of(
                         "email", nullSafe(engineer.getEmail()),
-                        "role", nullSafe(engineer.getRole())
+                        "role", nullSafe(engineer.getRole()),
+                        "primary_team_id", primaryTeamId,
+                        "team_ids", teamIds,
+                        "team_names", teamNames
                 )
         );
     }
