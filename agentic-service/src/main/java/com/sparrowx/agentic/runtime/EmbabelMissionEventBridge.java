@@ -333,48 +333,63 @@ public final class EmbabelMissionEventBridge
 
         return switch (shortName) {
 
-            case "interpret" ->
-                    new ActionProjection(
-                            "interpret",
-                            "Intent interpretation",
-                            "interpret",
-                            "Interpret mission request",
-                            "intent-component",
-                            ComponentKind.INTENT_INTERPRETATION,
-                            "IntentComponent",
-                            "Interpreting mission intent",
-                            "Mission intent interpreted",
-                            10.0,
-                            20.0
-                    );
-
-            case "plan" ->
-                    new ActionProjection(
-                            "planning",
-                            "Mission planning",
-                            "plan",
-                            "Create mission plan",
-                            "planning-component",
-                            ComponentKind.PLANNING,
-                            "PlanningComponent",
-                            "Planning mission execution",
-                            "Mission plan created",
-                            30.0,
-                            40.0
-                    );
-
-            case "collectEvidence" ->
+            case "buildDocumentEvidence" ->
                     new ActionProjection(
                             "evidence",
-                            "Evidence collection",
-                            "collect-evidence",
-                            "Collect mission evidence",
-                            "evidence-service",
+                            "Document evidence",
+                            "build-document-evidence",
+                            "Search document evidence",
+                            "document-service",
                             ComponentKind.CUSTOM,
-                            "MissionEvidenceService",
-                            "Collecting mission evidence",
-                            "Mission evidence collected",
-                            50.0,
+                            "DocumentService",
+                            "Searching relevant document evidence",
+                            "Document evidence collected",
+                            20.0,
+                            45.0
+                    );
+
+            case "searchInternalEntities" ->
+                    new ActionProjection(
+                            "evidence",
+                            "Internal context",
+                            "search-internal-entities",
+                            "Search internal entities",
+                            "internal-service",
+                            ComponentKind.CUSTOM,
+                            "InternalService",
+                            "Searching internal context",
+                            "Internal context searched",
+                            30.0,
+                            50.0
+                    );
+
+            case "readCompanyGraph" ->
+                    new ActionProjection(
+                            "evidence",
+                            "Company graph",
+                            "read-company-graph",
+                            "Explore company graph",
+                            "internal-service",
+                            ComponentKind.CUSTOM,
+                            "InternalService",
+                            "Exploring company relationships",
+                            "Company graph explored",
+                            45.0,
+                            65.0
+                    );
+
+            case "readLearningGraph" ->
+                    new ActionProjection(
+                            "evidence",
+                            "Learning graph",
+                            "read-learning-graph",
+                            "Expand related knowledge",
+                            "internal-service",
+                            ComponentKind.CUSTOM,
+                            "InternalService",
+                            "Expanding related knowledge",
+                            "Related knowledge expanded",
+                            55.0,
                             70.0
                     );
 
@@ -390,7 +405,7 @@ public final class EmbabelMissionEventBridge
                             "Synthesizing grounded response",
                             "Grounded response synthesized",
                             80.0,
-                            90.0
+                            95.0
                     );
 
             default -> null;

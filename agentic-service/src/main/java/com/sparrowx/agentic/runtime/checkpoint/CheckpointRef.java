@@ -50,6 +50,7 @@ public record CheckpointRef(
     public enum CheckpointType {
         UNSPECIFIED,
         MISSION_INPUT,
+        MISSION_INTENT,
         PREPARED_ARTIFACTS,
         OBSERVATION,
         MISSION_RESULT
