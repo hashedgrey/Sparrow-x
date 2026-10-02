@@ -18,9 +18,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 @Component
 public class DiceDocumentEnricher {
@@ -233,26 +231,147 @@ public class DiceDocumentEnricher {
          * propositions/entities produced by successful chunks remain
          * available here.
          */
-        repairMissingUpdatedEntities(
-                results,
-                namedEntityDataRepository
+        repairMissingUpdatedEntities(results, namedEntityDataRepository);
+
+        /*
+         * TEMPORARY PROFILING SPLIT.
+         *
+         * This reproduces the two parts of DICE
+         * persistCanonicalPropositions() separately so we can determine
+         * whether entity persistence or proposition persistence owns the latency.
+         */
+        var propsToSave = results.propositionsToPersist();
+
+        Set<String> referencedEntityIds = new HashSet<>();
+
+        for (var proposition : propsToSave) {
+            for (var mention : proposition.getMentions()) {
+                if (mention.getResolvedId() != null) {
+                    referencedEntityIds.add(mention.getResolvedId());
+                }
+            }
+        }
+
+
+        /*
+         * 1. Entity persistence
+         */
+        long entityPersistStart = System.nanoTime();
+
+        for (var entity : results.newEntities()) {
+            if (referencedEntityIds.contains(entity.getId())) {
+                namedEntityDataRepository.save(entity);
+            }
+        }
+
+        for (var entity : results.updatedEntities()) {
+            if (referencedEntityIds.contains(entity.getId())) {
+                namedEntityDataRepository.update(entity);
+            }
+        }
+
+        long entityPersistMillis =
+                (System.nanoTime() - entityPersistStart) / 1_000_000;
+
+        logger.info(
+                "DICE entity persistence complete "
+                        + "documentId={} newEntities={} updatedEntities={} durationMs={}",
+                documentId.value(),
+                results.newEntities().size(),
+                results.updatedEntities().size(),
+                entityPersistMillis
         );
 
-        results.persist(
-                propositionRepository,
-                namedEntityDataRepository
-        );
 
-        var graphResult =
-                graphProjectionService.projectAndPersist(
-                        results.propositionsToPersist()
+        /*
+         * 2. Proposition persistence
+         */
+        long propositionPersistStart = System.nanoTime();
+
+        var canonical = new java.util.ArrayList<com.embabel.dice.proposition.Proposition>();
+
+        int index = 0;
+
+        for (var proposition : propsToSave) {
+
+            long singleStart = System.nanoTime();
+
+            var saved =
+                    propositionRepository.save(
+                            proposition
+                    );
+
+            long singleMillis =
+                    (System.nanoTime() - singleStart) / 1_000_000;
+
+            logger.info(
+                    "DICE proposition save "
+                            + "index={} propositionId={} durationMs={}",
+                    index,
+                    proposition.getId(),
+                    singleMillis
+            );
+
+            canonical.add(saved);
+            index++;
+        }
+
+        var persisted =
+                com.embabel.dice.proposition.PropositionPersistenceResult.of(
+                        propsToSave,
+                        canonical
                 );
 
-        var projectionResults =
-                graphResult.getFirst();
+        long propositionPersistMillis =
+                (System.nanoTime() - propositionPersistStart) / 1_000_000;
 
-        var relationshipPersistence =
-                graphResult.getSecond();
+        logger.info(
+                "DICE proposition persistence complete "
+                        + "documentId={} propositions={} durationMs={}",
+                documentId.value(),
+                propsToSave.size(),
+                propositionPersistMillis
+        );
+
+
+        /*
+         * 3. Structural relationships
+         */
+        long structuralStart = System.nanoTime();
+
+        results.wireStructuralRelationships(
+                persisted,
+                namedEntityDataRepository
+        );
+
+        long structuralMillis =
+                (System.nanoTime() - structuralStart) / 1_000_000;
+
+        logger.info(
+                "DICE structural relationship wiring complete "
+                        + "documentId={} durationMs={}",
+                documentId.value(),
+                structuralMillis
+        );
+
+
+
+
+        long projectionStart = System.nanoTime();
+        var graphResult = graphProjectionService.projectAndPersist(results.propositionsToPersist());
+
+        long projectionMillis =
+                (System.nanoTime() - projectionStart) / 1_000_000;
+
+        logger.info(
+                "DICE graph projection/persistence complete "
+                        + "documentId={} durationMs={}",
+                documentId.value(),
+                projectionMillis
+        );
+        var projectionResults = graphResult.getFirst();
+
+        var relationshipPersistence = graphResult.getSecond();
 
         if (relationshipPersistence.getFailedCount() > 0) {
             throw new IllegalStateException(
