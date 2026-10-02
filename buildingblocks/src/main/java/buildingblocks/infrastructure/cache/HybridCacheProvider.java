@@ -1,10 +1,12 @@
 package buildingblocks.infrastructure.cache;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
 
 @Component
 @Primary
+@ConditionalOnBean(RedisCacheProvider.class)
 public class HybridCacheProvider implements CacheProvider {
 
     private final CaffeineCacheProvider l1;

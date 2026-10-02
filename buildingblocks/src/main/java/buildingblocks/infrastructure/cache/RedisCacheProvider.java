@@ -1,5 +1,8 @@
 package buildingblocks.infrastructure.cache;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ScanOptions;
@@ -7,10 +10,16 @@ import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
 import java.time.Duration;
 
 @Component
+@ConditionalOnBean(RedisConnectionFactory.class)
+@ConditionalOnProperty(
+        prefix = "buildingblocks.redis",
+        name = "enabled",
+        havingValue = "true",
+        matchIfMissing = false
+)
 public class RedisCacheProvider implements CacheProvider {
 
     private final RedisTemplate<String, byte[]> redisTemplate;
