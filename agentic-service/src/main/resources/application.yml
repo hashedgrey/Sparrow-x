@@ -1,23 +1,18 @@
 spring:
   application:
-    name: agentic-service
+    name: ${SERVICE_NAME:agentic-service}
+
   profiles:
     active: dev
-  main:
-    allow-circular-references: false
+
   mvc:
     problemdetails:
       enabled: true
+
   grpc:
     server:
       port: ${GRPC_SERVER_PORT:50056}
-#  flyway:
-#    #enabled: true
-#    locations: classpath:db/migration
-#    baseline-on-migrate: true
-#    baseline-version: 0
-#    validate-on-migrate: true
-#    clean-disabled: true
+
   jpa:
     entity-packages-to-scan: com.sparrowx.agentic.data.postgres.entities
     properties:
@@ -27,31 +22,33 @@ spring:
         format_sql: false
     show-sql: false
 
+
 server:
   port: ${SERVER_PORT:8086}
 
+
 embabel:
   models:
-    default-llm: gemini-2.5-flash
+    # Exactly one active deployment LLM.
+    # Change provider/model/key below to switch models.
+    default-llm: ${AGENTIC_LLM_MODEL:gemini-3.1-flash-lite}
 
   agent:
     platform:
       scanning:
         annotation: true
         bean: false
+
       llm-operations:
         data-binding:
           max-attempts: 2
-      models:
-        gemini:
-          api-key: ${GEMINI_API_KEY}
-          max-attempts: 1
+
       observability:
         enabled: true
         tracing-enabled: true
         metrics-enabled: true
 
-        service-name: agentic-service
+        service-name: ${SERVICE_NAME:agentic-service}
         max-attribute-length: 16000
 
         trace-agent: true
@@ -64,51 +61,106 @@ embabel:
         trace-lifecycle-states: true
         trace-rag: true
 
-        # Start false for SparrowX because prompts/doc content
-        # can contain internal enterprise data.
+        # Keep false because prompts/document content may contain
+        # internal enterprise data.
         capture-message-content: false
 
+
 sparrowx:
-  # Compatibility alias for TemporalMissionClient in the supplied source.
+  buildingblocks:
+    redis:
+      enabled: false
+  # Compatibility alias for TemporalMissionClient.
   # Both client and worker resolve to the same physical queue.
   temporal:
     mission-task-queue: ${TEMPORAL_TASK_QUEUE:agentic-mission-task-queue}
+
   agentic:
+    # Main Embabel LLM.
+    #
+    # No fallback chain. This is the one active model.
+    #
+    # Gemini example:
+    #   AGENTIC_LLM_PROVIDER=GoogleGenAI
+    #   AGENTIC_LLM_MODEL=gemini-3.1-flash-lite
+    #
+    # DeepSeek example:
+    #   AGENTIC_LLM_PROVIDER=Deepseek
+    #   AGENTIC_LLM_MODEL=deepseek-v4-flash
+    main-llm:
+      provider: ${AGENTIC_LLM_PROVIDER:GoogleGenAI}
+      model: ${AGENTIC_LLM_MODEL:gemini-3.1-flash-lite}
+      api-key: ${AGENTIC_LLM_API_KEY:}
+
+    # Structured semantic-decision LLM path.
+    #
+    # Keep this section until StructuredLlmClient is moved onto
+    # the same generic active-main-LLM service.
+    llm:
+      default-provider: geminiStructuredLlmProvider
+
+      routes:
+        - provider: google
+          model: ${AGENTIC_DECISION_LLM_MODEL:gemini-3.1-flash-lite}
+          priority: 0
+          enabled: true
+          capabilities:
+            - structured-output
+
+    system-one:
+      provider: ${SYSTEM_ONE_PROVIDER:jev}
+
+      jev:
+        base-url: ${JEV_BASE_URL:https://api.typesafe.ai}
+        api-key: ${TYPESAFE_API_KEY:}
+        model: ${JEV_MODEL:jev-latest}
+
+      laya:
+        base-url: ${LAYA_BASE_URL:http://localhost:8088}
+        model: ${LAYA_MODEL:convaiinnovations/laya-typed-decisions}
+
     temporal:
       endpoint: ${TEMPORAL_ENDPOINT:localhost:7233}
       namespace: ${TEMPORAL_NAMESPACE:default}
       task-queue: ${TEMPORAL_TASK_QUEUE:agentic-mission-task-queue}
       worker-enabled: ${TEMPORAL_WORKER_ENABLED:true}
+
       worker:
         max-concurrent-workflow-tasks: 100
         max-concurrent-activities: 50
+
     downstream:
       internal:
         host: ${INTERNAL_GRPC_HOST:localhost}
         port: ${INTERNAL_GRPC_PORT:50055}
         plaintext: ${INTERNAL_GRPC_PLAINTEXT:true}
         max-inbound-message-bytes: 16777216
+
       document:
         host: ${DOCUMENT_GRPC_HOST:localhost}
         port: ${DOCUMENT_GRPC_PORT:50054}
         plaintext: ${DOCUMENT_GRPC_PLAINTEXT:true}
         max-inbound-message-bytes: 16777216
 
+
 management:
   endpoints:
     web:
       exposure:
         include: health,info,prometheus
+
   endpoint:
     prometheus:
       access: unrestricted
+
   metrics:
     tags:
-      service: agentic-service
+      service: ${SERVICE_NAME:agentic-service}
+
   tracing:
-    enabled: true
     sampling:
       probability: 1.0
+
 
 logging:
   file:

@@ -5,7 +5,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 
 @SpringBootApplication(
-        scanBasePackages = {"com.sparrowx.agentic", "buildingblocks"})
+        scanBasePackages = {"com.sparrowx.agentic", "buildingblocks"}
+)
 @ConfigurationPropertiesScan
 public class AgenticApplication {
 

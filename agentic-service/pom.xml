@@ -8,7 +8,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.5.14</version>
+        <version>4.1.1</version>
         <relativePath/>
     </parent>
 
@@ -20,17 +20,17 @@
 
     <properties>
         <java.version>24</java.version>
-        <embabel-agent.version>1.0.0</embabel-agent.version>
+        <embabel-agent.version>1.5.2</embabel-agent.version>
         <temporal.version>1.37.0</temporal.version>
-        <grpc.version>1.60.1</grpc.version>
+        <grpc.version>1.83.1</grpc.version>
         <protobuf.version>3.25.1</protobuf.version>
         <protobuf.maven.plugin.version>0.6.1</protobuf.maven.plugin.version>
         <os.maven.plugin.version>1.7.1</os.maven.plugin.version>
         <maven.compiler.plugin.version>3.14.0</maven.compiler.plugin.version>
         <lombok.version>1.18.38</lombok.version>
-        <micrometer.version>1.15.6</micrometer.version>
         <otel.version>2.23.0</otel.version>
         <otel.api.version>1.38.0</otel.api.version>
+        <typesafe.version>0.1.0</typesafe.version>
     </properties>
 
     <dependencyManagement>
@@ -61,16 +61,10 @@
 
         <dependency>
             <groupId>com.embabel.agent</groupId>
-            <artifactId>embabel-agent-starter-gemini</artifactId>
+            <artifactId>embabel-agent-starter-byok</artifactId>
             <version>${embabel-agent.version}</version>
         </dependency>
 
-        <!--
-          Directly declared because SparrowX imports AgentPlatform and the
-          annotation/invocation API. The OpenAI starter also brings this
-          transitively; this declaration makes the compile-time contract
-          explicit and protects dependency analysis/enforcer rules.
-        -->
         <dependency>
             <groupId>com.embabel.agent</groupId>
             <artifactId>embabel-agent-api</artifactId>
@@ -89,11 +83,15 @@
             <version>0.6.0</version>
         </dependency>
 
-
         <dependency>
             <groupId>io.temporal</groupId>
             <artifactId>temporal-spring-boot-starter</artifactId>
             <version>${temporal.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-grpc-server</artifactId>
         </dependency>
 
         <dependency>
@@ -124,7 +122,6 @@
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>context-propagation</artifactId>
-            <version>1.1.4</version>
         </dependency>
         <dependency>
             <groupId>io.opentelemetry.instrumentation</groupId>
@@ -146,22 +143,18 @@
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
-            <version>${protobuf.version}</version>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-protobuf</artifactId>
-            <version>${grpc.version}</version>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-stub</artifactId>
-            <version>${grpc.version}</version>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-netty-shaded</artifactId>
-            <version>${grpc.version}</version>
         </dependency>
 
         <dependency>
@@ -190,6 +183,18 @@
             <artifactId>embabel-agent-test</artifactId>
             <version>${embabel-agent.version}</version>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+            <version>4.2.0-M1</version>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+            <version>4.2.0-M1</version>
+            <scope>compile</scope>
         </dependency>
     </dependencies>
 

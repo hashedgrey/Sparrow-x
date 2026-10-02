@@ -22,14 +22,14 @@ import com.sparrowx.agentic.proto.SubmitMissionRequest;
 import com.sparrowx.agentic.proto.SubmitMissionResponse;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
-import org.springframework.grpc.server.service.GrpcService;
+import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-@GrpcService
+@Service
 public final class AgenticServiceGrpcImpl
         extends AgenticServiceGrpc.AgenticServiceImplBase {
 
@@ -63,30 +63,19 @@ public final class AgenticServiceGrpcImpl
                 "queryBus must not be null"
         );
 
-        this.agenticMapper = Objects.requireNonNull(
-                agenticMapper,
-                "agenticMapper must not be null"
+        this.agenticMapper = Objects.requireNonNull(agenticMapper, "agenticMapper must not be null"
         );
 
         this.eventMapper = Objects.requireNonNull(
-                eventMapper,
-                "eventMapper must not be null"
-        );
-
+                eventMapper, "eventMapper must not be null");
         this.exceptionHandler = Objects.requireNonNull(
-                exceptionHandler,
-                "exceptionHandler must not be null"
-        );
+                exceptionHandler, "exceptionHandler must not be null");
 
         this.reviewerPolicy = Objects.requireNonNull(
-                reviewerPolicy,
-                "reviewerPolicy must not be null"
-        );
+                reviewerPolicy, "reviewerPolicy must not be null");
 
         this.identityProvider = Objects.requireNonNull(
-                identityProvider,
-                "identityProvider must not be null"
-        );
+                identityProvider, "identityProvider must not be null");
     }
 
     @Override
