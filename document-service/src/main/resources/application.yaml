@@ -80,8 +80,8 @@ sparrowx:
 
     dice:
       ingestion:
-        extraction-batch-size: ${DOCUMENT_DICE_EXTRACTION_BATCH_SIZE:4}
-        extraction-threads: ${DOCUMENT_DICE_EXTRACTION_THREADS:4}
-        projection-parallelism: ${DOCUMENT_DICE_PROJECTION_PARALLELISM:4}
+        extraction-batch-size: ${DOCUMENT_DICE_EXTRACTION_BATCH_SIZE:2}
+        extraction-threads: ${DOCUMENT_DICE_EXTRACTION_THREADS:2}
+        projection-parallelism: ${DOCUMENT_DICE_PROJECTION_PARALLELISM:2}
         existing-propositions-to-show: ${DOCUMENT_DICE_EXISTING_PROPOSITIONS:25}
         schema-adherence: ${DOCUMENT_DICE_SCHEMA_ADHERENCE:RELAXED}
