@@ -4,7 +4,6 @@ import com.embabel.agent.api.common.OperationContext;
 import com.embabel.agent.api.common.PromptRunner;
 import com.embabel.agent.api.streaming.StreamingPromptRunnerBuilder;
 import com.embabel.agent.spi.LlmService;
-import com.sparrowx.agentic.components.PlanningComponent.Observation;
 import com.sparrowx.agentic.governance.model.GovernanceDecision;
 import com.sparrowx.agentic.mission.evidence.Citation;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
@@ -13,7 +12,7 @@ import com.sparrowx.agentic.mission.model.MissionStreamEvent;
 import com.sparrowx.agentic.mission.model.Recommendation;
 import com.sparrowx.agentic.mission.model.ResultSection;
 import com.sparrowx.agentic.planning.MissionIntent;
-import com.sparrowx.agentic.planning.MissionPlan;
+
 import reactor.core.publisher.Flux;
 
 import java.time.Duration;
@@ -86,53 +85,43 @@ public final class SynthesisComponent {
             );
         }
 
-        String operationId =
-                "synthesis:"
-                        + UUID.randomUUID();
+        if (request.intent().requiresRetrieval()
+                && request.evidenceRefs().isEmpty()) {
 
-        LlmService<?> synthesisLlm =
-                streamingLlmSupport.create(
-                        usage ->
-                                streamEventSink.accept(
-                                        usageEvent(
-                                                request.missionId(),
-                                                operationId,
-                                                usage
-                                        )
-                                )
+            return noEvidenceDraft(request);
+        }
+
+        if (request.intent().requiresCitations()
+                && !request.evidenceRefs().isEmpty()
+                && request.citations().isEmpty()) {
+
+            throw new IllegalStateException(
+                    "grounded synthesis requires citations but none were built"
+            );
+        }
+
+        String operationId = "synthesis:" + UUID.randomUUID();
+
+        LlmService<?> synthesisLlm = streamingLlmSupport.create(usage ->
+                                streamEventSink.accept(usageEvent(request.missionId(), operationId, usage))
                 );
 
-        PromptRunner runner =
-                context.ai()
-                        .withLlmService(
-                                synthesisLlm
-                        );
+        PromptRunner runner = context.ai().withLlmService(synthesisLlm);
 
         Flux<String> stream =
                 new StreamingPromptRunnerBuilder(runner)
                         .streaming()
-                        .withPrompt(
-                                synthesisPrompt(request)
-                        )
+                        .withPrompt(synthesisPrompt(request))
                         .generateStream();
 
-        StringBuilder raw =
-                new StringBuilder();
-
-        AtomicLong sequence =
-                new AtomicLong(0L);
-
-        FinalAnswerProjector projector =
-                new FinalAnswerProjector();
-
+        StringBuilder raw = new StringBuilder();
+        AtomicLong sequence = new AtomicLong(0L);
+        FinalAnswerProjector projector = new FinalAnswerProjector();
         stream.doOnNext(chunk -> {
-
                     if (chunk == null || chunk.isEmpty()) {
                         return;
                     }
-
                     raw.append(chunk);
-
                     projector.project(
                             raw,
                             text -> {
@@ -170,6 +159,28 @@ public final class SynthesisComponent {
         return toDraft(projection);
     }
 
+    private static SynthesisDraft noEvidenceDraft(
+            SynthesisRequest request
+    ) {
+        String answer =
+                "I could not find relevant SparrowX evidence to support "
+                        + "an answer to this request.";
+
+        return new SynthesisDraft(
+                answer,
+                answer,
+                List.of(),
+                List.of(),
+                List.of(),
+                Map.of(),
+                Map.of(
+                        "synthesisEngine",
+                        "deterministic-no-evidence",
+                        "llmInvoked",
+                        false
+                )
+        );
+    }
     private static MissionStreamEvent.Usage usageEvent(
             String missionId,
             String operationId,
@@ -230,68 +241,44 @@ public final class SynthesisComponent {
     private static String synthesisPrompt(
             SynthesisRequest request
     ) {
-        return """
+            return """
             You are the final synthesis stage of SparrowX.
-            Produce a grounded final response for the mission below.
-
-            <mission_id>
+            Produce a grounded response to the user's request.
+    
+            <intent>
             %s
-            </mission_id>
-
-            <mission_intent>
-            %s
-            </mission_intent>
-
-            <final_plan>
-            %s
-            </final_plan>
-
+            </intent>
+    
             <observations>
             %s
             </observations>
-
-            <evidence_references>
+    
+            <grounded_evidence>
             %s
-            </evidence_references>
-
-            <governance_decisions>
+            </grounded_evidence>
+    
+            <governance>
             %s
-            </governance_decisions>
-
+            </governance>
+    
             <required_sections>
             %s
             </required_sections>
-
-            <mission_context>
+    
+            <context>
             %s
-            </mission_context>
-
-            <citations>
-            %s
-            </citations>
-
+            </context>
+    
             Requirements:
-
             - Answer the user's original objective directly.
-            - Use only the supplied mission state, observations and evidence.
-            - Do not invent facts, entities, relationships or evidence.
-            - Preserve uncertainty when the evidence is incomplete.
-            - Respect warnings and governance decisions present in the context.
-            - Do not claim that evidence proves something it does not support.
-            - The final answer must contain the complete user-facing answer.
-            - The executive summary must briefly state the important result.
-            - Preserve Markdown headings and lists inside the final answer when useful.
-            - Do not include implementation or debug commentary.
-
-            Output protocol:
-
-            - Output exactly the following two tagged sections.
-            - Output final_answer FIRST.
-            - Do not emit any text before <final_answer>.
-            - Do not emit any text after </executive_summary>.
-            - Do not wrap the response in Markdown code fences.
-            - Do not omit or rename the tags.
-
+            - Use only the supplied evidence and context.
+            - Do not invent unsupported facts.
+            - Preserve uncertainty when evidence is incomplete.
+            - Respect warnings and governance decisions.
+            - Use citation labels when supplied.
+            - Put the complete user-facing response in final_answer.
+            - Keep executive_summary concise.
+    
             <final_answer>
             complete user-facing answer
             </final_answer>
@@ -299,56 +286,49 @@ public final class SynthesisComponent {
             concise summary
             </executive_summary>
             """.formatted(
-                request.missionId(),
-                request.intent(),
-                request.finalPlan(),
-                request.observations(),
-                request.evidenceRefs(),
-                request.governanceDecisions(),
-                request.requiredSections(),
-                request.context(),
-                request.citations()
+                    compactIntent(request.intent()),
+                    request.observations(),
+                    groundedEvidence(request),
+                    request.governanceDecisions(),
+                    request.requiredSections(),
+                    request.context()
+            );
+    }
+
+    private static Map<String, Object> compactIntent(MissionIntent intent) {
+        return Map.of(
+                "objective", intent.objective(),
+                "targetEntities", intent.targetEntities(),
+                "topics", intent.topics(),
+                "requiresCitations", intent.requiresCitations(),
+                "requiresVerification", intent.requiresVerification()
         );
     }
 
-    private static SynthesisProjection parseProjection(
-            String raw
-    ) {
-        String finalAnswer =
-                extractRequired(
-                        raw,
-                        FINAL_OPEN,
-                        FINAL_CLOSE,
-                        "finalAnswer"
-                ).strip();
+    private static Object groundedEvidence(SynthesisRequest request) {
+        if (!request.citations().isEmpty()) {
+            return request.citations();
+        }
 
-        String executiveSummary =
-                extractRequired(
-                        raw,
-                        SUMMARY_OPEN,
-                        SUMMARY_CLOSE,
-                        "executiveSummary"
-                ).strip();
-
-        return new SynthesisProjection(
-                executiveSummary,
-                finalAnswer
-        );
+        return request.evidenceRefs();
+    }
+    private static SynthesisProjection parseProjection(String raw) {
+        String finalAnswer = extractRequired(raw, FINAL_OPEN, FINAL_CLOSE).strip();
+        String executiveSummary = extractRequired(raw, SUMMARY_OPEN, SUMMARY_CLOSE).strip();
+        return new SynthesisProjection(executiveSummary, finalAnswer);
     }
 
     private static String extractRequired(
             String raw,
             String open,
-            String close,
-            String field
+            String close
     ) {
         int start =
                 raw.indexOf(open);
 
         if (start < 0) {
             throw new IllegalStateException(
-                    "Streaming synthesis omitted "
-                            + open
+                    "Streaming synthesis omitted " + open
             );
         }
 
@@ -360,35 +340,24 @@ public final class SynthesisComponent {
                         start
                 );
 
+        /*
+         * If the model emitted the required opening tag but omitted
+         * the closing wrapper, accept the remainder of the completed
+         * stream as the value.
+         */
         if (end < 0) {
-            throw new IllegalStateException(
-                    "Streaming synthesis omitted "
-                            + close
-            );
+            return raw.substring(start)
+                    .trim();
         }
 
-        String value =
-                raw.substring(
-                        start,
-                        end
-                );
-
-        if (value.isBlank()) {
-            throw new IllegalStateException(
-                    field + " was blank"
-            );
-        }
-
-        return value;
+        return raw.substring(
+                start,
+                end
+        ).trim();
     }
 
-    private static SynthesisDraft toDraft(
-            SynthesisProjection projection
-    ) {
-        Objects.requireNonNull(
-                projection,
-                "synthesis projection must not be null"
-        );
+    private static SynthesisDraft toDraft(SynthesisProjection projection) {
+        Objects.requireNonNull(projection, "synthesis projection must not be null");
 
         return new SynthesisDraft(
                 projection.executiveSummary(),
@@ -397,21 +366,13 @@ public final class SynthesisComponent {
                 List.of(),
                 List.of(),
                 Map.of(),
-                Map.of(
-                        "synthesisEngine",
-                        "embabel-streaming-operation-context"
-                )
+                Map.of("synthesisEngine", "embabel-streaming-operation-context")
         );
     }
 
-    private static String answerResumeToken(
-            String missionId,
-            long sequence
+    private static String answerResumeToken(String missionId, long sequence
     ) {
-        return "answer:"
-                + missionId
-                + ":"
-                + sequence;
+        return "answer:" + missionId + ":" + sequence;
     }
 
     /**
@@ -426,9 +387,7 @@ public final class SynthesisComponent {
         private int nextIndex = -1;
         private boolean closed;
 
-        private void project(
-                StringBuilder raw,
-                Consumer<String> sink
+        private void project(StringBuilder raw, Consumer<String> sink
         ) {
             if (closed) {
                 return;
@@ -436,50 +395,28 @@ public final class SynthesisComponent {
 
             if (contentStart < 0) {
 
-                int open =
-                        raw.indexOf(
-                                FINAL_OPEN
-                        );
-
+                int open = raw.indexOf(FINAL_OPEN);
                 if (open < 0) {
                     return;
                 }
-
-                contentStart =
-                        open + FINAL_OPEN.length();
-
-                nextIndex =
-                        contentStart;
+                contentStart = open + FINAL_OPEN.length();
+                nextIndex = contentStart;
             }
-
-            int close =
-                    raw.indexOf(
-                            FINAL_CLOSE,
-                            contentStart
-                    );
-
+            int close = raw.indexOf(FINAL_CLOSE, contentStart);
             int safeEnd;
 
             if (close >= 0) {
                 safeEnd = close;
             } else {
-                safeEnd =
-                        raw.length()
-                                - partialMarkerSuffixLength(
-                                raw,
-                                FINAL_CLOSE,
-                                contentStart
-                        );
+                safeEnd = raw.length() - partialMarkerSuffixLength(raw, FINAL_CLOSE, contentStart);
             }
 
             if (nextIndex == contentStart) {
                 while (nextIndex < safeEnd) {
 
-                    char current =
-                            raw.charAt(nextIndex);
+                    char current = raw.charAt(nextIndex);
 
-                    if (current != '\n'
-                            && current != '\r') {
+                    if (current != '\n' && current != '\r') {
                         break;
                     }
 
@@ -488,16 +425,8 @@ public final class SynthesisComponent {
             }
 
             if (safeEnd > nextIndex) {
-
-                String delta =
-                        raw.substring(
-                                nextIndex,
-                                safeEnd
-                        );
-
-                nextIndex =
-                        safeEnd;
-
+                String delta = raw.substring(nextIndex, safeEnd);
+                nextIndex = safeEnd;
                 sink.accept(delta);
             }
 
@@ -511,9 +440,7 @@ public final class SynthesisComponent {
                 String marker,
                 int minimumIndex
         ) {
-            int available =
-                    raw.length()
-                            - minimumIndex;
+            int available = raw.length() - minimumIndex;
 
             int max =
                     Math.min(
@@ -525,19 +452,11 @@ public final class SynthesisComponent {
                  length > 0;
                  length--) {
 
-                int rawStart =
-                        raw.length() - length;
-
+                int rawStart = raw.length() - length;
                 boolean match = true;
+                for (int index = 0; index < length; index++) {
 
-                for (int index = 0;
-                     index < length;
-                     index++) {
-
-                    if (raw.charAt(
-                            rawStart + index
-                    ) != marker.charAt(index)) {
-
+                    if (raw.charAt(rawStart + index) != marker.charAt(index)) {
                         match = false;
                         break;
                     }
@@ -562,8 +481,7 @@ public final class SynthesisComponent {
             String missionId,
             boolean reactorComplete,
             MissionIntent intent,
-            MissionPlan finalPlan,
-            List<Observation> observations,
+            List<Map<String, Object>> observations,
             List<EvidenceRef> evidenceRefs,
             List<Citation> citations,
             List<GovernanceDecision> governanceDecisions,
@@ -571,65 +489,14 @@ public final class SynthesisComponent {
             Map<String, Object> context
     ) {
         public SynthesisRequest {
-            missionId =
-                    requireText(
-                            missionId,
-                            "missionId"
-                    );
-
-            intent =
-                    Objects.requireNonNull(
-                            intent,
-                            "intent must not be null"
-                    );
-
-            finalPlan =
-                    Objects.requireNonNull(
-                            finalPlan,
-                            "finalPlan must not be null"
-                    );
-
-            observations =
-                    observations == null
-                            ? List.of()
-                            : List.copyOf(
-                            observations
-                    );
-
-            evidenceRefs =
-                    evidenceRefs == null
-                            ? List.of()
-                            : List.copyOf(
-                            evidenceRefs
-                    );
-
-            citations =
-                    citations == null
-                            ? List.of()
-                            : List.copyOf(
-                            citations
-                    );
-
-            governanceDecisions =
-                    governanceDecisions == null
-                            ? List.of()
-                            : List.copyOf(
-                            governanceDecisions
-                    );
-
-            requiredSections =
-                    requiredSections == null
-                            ? List.of()
-                            : List.copyOf(
-                            requiredSections
-                    );
-
-            context =
-                    context == null
-                            ? Map.of()
-                            : Map.copyOf(
-                            context
-                    );
+            missionId = requireText(missionId, "missionId");
+            intent = Objects.requireNonNull(intent, "intent must not be null");
+            observations = observations == null ? List.of() : List.copyOf(observations);
+            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
+            citations = citations == null ? List.of() : List.copyOf(citations);
+            governanceDecisions = governanceDecisions == null ? List.of() : List.copyOf(governanceDecisions);
+            requiredSections = requiredSections == null ? List.of() : List.copyOf(requiredSections);
+            context = context == null ? Map.of() : Map.copyOf(context);
         }
     }
 
@@ -643,63 +510,20 @@ public final class SynthesisComponent {
             Map<String, Object> debugSummary
     ) {
         public SynthesisDraft {
-            executiveSummary =
-                    executiveSummary == null
-                            ? ""
-                            : executiveSummary;
-
-            finalAnswer =
-                    requireText(
-                            finalAnswer,
-                            "finalAnswer"
-                    );
-
-            sections =
-                    sections == null
-                            ? List.of()
-                            : List.copyOf(
-                            sections
-                    );
-
-            findings =
-                    findings == null
-                            ? List.of()
-                            : List.copyOf(
-                            findings
-                    );
-
-            recommendations =
-                    recommendations == null
-                            ? List.of()
-                            : List.copyOf(
-                            recommendations
-                    );
-
-            structuredOutput =
-                    structuredOutput == null
-                            ? Map.of()
-                            : Map.copyOf(
-                            structuredOutput
-                    );
-
-            debugSummary =
-                    debugSummary == null
-                            ? Map.of()
-                            : Map.copyOf(
-                            debugSummary
-                    );
+            executiveSummary = executiveSummary == null ? "" : executiveSummary;
+            finalAnswer = requireText(finalAnswer, "finalAnswer");
+            sections = sections == null ? List.of() : List.copyOf(sections);
+            findings = findings == null ? List.of() : List.copyOf(findings);
+            recommendations = recommendations == null ? List.of() : List.copyOf(recommendations);
+            structuredOutput = structuredOutput == null ? Map.of() : Map.copyOf(structuredOutput);
+            debugSummary = debugSummary == null ? Map.of() : Map.copyOf(debugSummary);
         }
     }
 
-    private static String requireText(
-            String value,
-            String field
+    private static String requireText(String value, String field
     ) {
-        if (value == null
-                || value.isBlank()) {
-
-            throw new IllegalArgumentException(
-                    field + " must not be blank"
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " must not be blank"
             );
         }
 
