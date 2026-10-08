@@ -11,6 +11,8 @@ import com.sparrowx.internal.grpc.EngineerRole;
 import com.sparrowx.internal.grpc.GetEngineerRequest;
 import com.sparrowx.internal.grpc.GetEngineerResponse;
 
+import java.util.Locale;
+
 public final class EngineerMapper {
 
     private EngineerMapper() {
@@ -75,16 +77,16 @@ public final class EngineerMapper {
             return EngineerRole.ENGINEER_ROLE_UNSPECIFIED;
         }
 
-        return switch (role.toString()) {
-            case "LEARNER", "ENGINEER_ROLE_LEARNER" ->
-                    EngineerRole.ENGINEER_ROLE_LEARNER;
-            case "ENGINEER", "ENGINEER_ROLE_ENGINEER" ->
-                    EngineerRole.ENGINEER_ROLE_ENGINEER;
-            case "AGENTIC_ENGINEER", "ENGINEER_ROLE_AGENTIC_ENGINEER" ->
-                    EngineerRole.ENGINEER_ROLE_AGENTIC_ENGINEER;
-            case "ADMIN", "ENGINEER_ROLE_ADMIN" ->
-                    EngineerRole.ENGINEER_ROLE_ADMIN;
-            default -> EngineerRole.ENGINEER_ROLE_UNSPECIFIED;
-        };
+        String normalized = role.toString().trim().toUpperCase(Locale.ROOT);
+
+        if (normalized.startsWith("ENGINEER_ROLE_")) {
+            normalized = normalized.substring("ENGINEER_ROLE_".length());
+        }
+
+        try {
+            return EngineerRole.valueOf("ENGINEER_ROLE_" + normalized);
+        } catch (IllegalArgumentException exception) {
+            return EngineerRole.ENGINEER_ROLE_UNSPECIFIED;
+        }
     }
 }

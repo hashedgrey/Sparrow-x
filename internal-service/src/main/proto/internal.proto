@@ -676,6 +676,8 @@ message InternalGraphNode {
   string label = 3;
   string summary = 4;
   string entity_id = 5;
+
+  map<string, string> attributes = 6;
 }
 
 message InternalGraphRelationship {

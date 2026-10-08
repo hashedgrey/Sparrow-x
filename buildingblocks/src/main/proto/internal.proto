@@ -111,8 +111,7 @@ service InternalService {
   rpc ReadInternalCompanyGraph(ReadInternalCompanyGraphRequest)
       returns (ReadInternalCompanyGraphResponse);
 
-  rpc ReadLearningGraph(ReadLearningGraphRequest)
-      returns (ReadLearningGraphResponse);
+
 }
 
 // ========================
@@ -707,18 +706,6 @@ message ReadInternalCompanyGraphResponse {
   InternalGraph graph = 1;
 }
 
-message ReadLearningGraphRequest {
-  RequestContext context = 1;
-  string root_entity_id = 2;
-  InternalGraphNodeType root_node_type = 3;
-  int32 depth = 4;
-  int32 limit = 5;
-}
-
-message ReadLearningGraphResponse {
-  InternalGraph graph = 1;
-}
-
 // ========================
 // Normalized Read-Only Graph
 // ========================
@@ -737,6 +724,8 @@ message InternalGraphNode {
   string label = 3;
   string summary = 4;
   string entity_id = 5;
+
+  map<string, string> attributes = 6;
 }
 
 message InternalGraphRelationship {
