@@ -44,8 +44,6 @@ public class SearchInternalEntitiesQueryHandler
     private final RepositoryJpaRepository repositoryRepository;
     private final InternalDocumentJpaRepository documentRepository;
     private final RunbookJpaRepository runbookRepository;
-    private final OnboardingPathJpaRepository onboardingPathRepository;
-    private final OnboardingTaskJpaRepository onboardingTaskRepository;
     private final EngineerJpaRepository engineerRepository;
     private final PermissionJpaRepository permissionRepository;
     private final SearchInternalEntitiesQueryValidator validator;
@@ -56,8 +54,6 @@ public class SearchInternalEntitiesQueryHandler
             RepositoryJpaRepository repositoryRepository,
             InternalDocumentJpaRepository documentRepository,
             RunbookJpaRepository runbookRepository,
-            OnboardingPathJpaRepository onboardingPathRepository,
-            OnboardingTaskJpaRepository onboardingTaskRepository,
             EngineerJpaRepository engineerRepository,
             PermissionJpaRepository permissionRepository,
             EngineerTeamMembershipJpaRepository membershipRepository,
@@ -68,8 +64,6 @@ public class SearchInternalEntitiesQueryHandler
         this.repositoryRepository = repositoryRepository;
         this.documentRepository = documentRepository;
         this.runbookRepository = runbookRepository;
-        this.onboardingPathRepository = onboardingPathRepository;
-        this.onboardingTaskRepository = onboardingTaskRepository;
         this.engineerRepository = engineerRepository;
         this.permissionRepository = permissionRepository;
         this.membershipRepository = membershipRepository;
@@ -130,21 +124,7 @@ public class SearchInternalEntitiesQueryHandler
                     );
         }
 
-        if (shouldSearch(allowedTypes, TYPE_ONBOARDING_PATH)) {
-            onboardingPathRepository
-                    .searchByTenantIdAndText(query.tenantId(), searchText)
-                    .forEach(path ->
-                            results.add(toResult(path, searchText))
-                    );
-        }
 
-        if (shouldSearch(allowedTypes, TYPE_ONBOARDING_TASK)) {
-            onboardingTaskRepository
-                    .searchByTenantIdAndText(query.tenantId(), searchText)
-                    .forEach(task ->
-                            results.add(toResult(task, searchText))
-                    );
-        }
 
         if (shouldSearch(allowedTypes, TYPE_ENGINEER)) {
 
@@ -364,48 +344,7 @@ public class SearchInternalEntitiesQueryHandler
         );
     }
 
-    private InternalEntitySearchResult toResult(
-            OnboardingPathEntity path,
-            String query
-    ) {
-        return new InternalEntitySearchResult(
-                path.getOnboardingPathId(),
-                TYPE_ONBOARDING_PATH,
-                path.getName(),
-                path.getSlug(),
-                path.getDescription(),
-                score(query, path.getName(), path.getSlug(), path.getDescription()),
-                matchReason(query, path.getName(), path.getSlug(), path.getDescription()),
-                path.getTargetModuleId(),
-                TYPE_MODULE,
-                Map.of(
-                        "target_module_id", nullSafe(path.getTargetModuleId())
-                )
-        );
-    }
 
-    private InternalEntitySearchResult toResult(
-            OnboardingTaskEntity task,
-            String query
-    ) {
-        return new InternalEntitySearchResult(
-                task.getOnboardingTaskId(),
-                TYPE_ONBOARDING_TASK,
-                task.getTitle(),
-                "",
-                task.getDescription(),
-                score(query, task.getTitle(), "", task.getDescription()),
-                matchReason(query, task.getTitle(), "", task.getDescription()),
-                task.getOnboardingPathId(),
-                TYPE_ONBOARDING_PATH,
-                Map.of(
-                        "onboarding_path_id", nullSafe(task.getOnboardingPathId()),
-                        "document_id", nullSafe(task.getDocumentId()),
-                        "runbook_id", nullSafe(task.getRunbookId()),
-                        "sort_order", String.valueOf(task.getSortOrder())
-                )
-        );
-    }
 
     private InternalEntitySearchResult toResult(
             EngineerEntity engineer,
