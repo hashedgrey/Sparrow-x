@@ -15,8 +15,7 @@ import java.util.Objects;
 
 /**
  * Deterministic Internal Service entity-search executor.
- *
- * Embabel planning happens above this class.
+ * Embabel planning and semantic parameter resolution happen above this class.
  */
 public final class SearchInternalEntitiesAction {
 
@@ -29,38 +28,19 @@ public final class SearchInternalEntitiesAction {
             InternalContextTool contextTool,
             InternalContextMapper contextMapper
     ) {
-        this.requestBuilder = Objects.requireNonNull(
-                requestBuilder,
-                "requestBuilder must not be null"
-        );
-
-        this.contextTool = Objects.requireNonNull(
-                contextTool,
-                "contextTool must not be null"
-        );
-
-        this.contextMapper = Objects.requireNonNull(
-                contextMapper,
-                "contextMapper must not be null"
-        );
+        this.requestBuilder = Objects.requireNonNull(requestBuilder, "requestBuilder must not be null");
+        this.contextTool = Objects.requireNonNull(contextTool, "contextTool must not be null");
+        this.contextMapper = Objects.requireNonNull(contextMapper, "contextMapper must not be null");
     }
 
-    public Result execute(
-            MissionContext context,
-            SearchSpec spec
-    ) {
-        SearchInternalEntitiesRequest request =
-                requestBuilder.build(context, spec);
+    public Result execute(MissionContext context, SearchSpec spec) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(spec, "spec must not be null");
 
-        SearchInternalEntitiesResponse response =
-                contextTool.searchEntities(context, request);
+        SearchInternalEntitiesRequest request = requestBuilder.build(context, spec);
+        SearchInternalEntitiesResponse response = contextTool.searchEntities(context, request);
 
-        return new Result(
-                response.getResultsList(),
-                contextMapper.fromSearch(response),
-                response.getAmbiguous(),
-                response.getWarningsList()
-        );
+        return Result.from(response, contextMapper);
     }
 
     public record Result(
@@ -69,19 +49,25 @@ public final class SearchInternalEntitiesAction {
             boolean ambiguous,
             List<String> warnings
     ) {
-
         public Result {
-            candidates = candidates == null
-                    ? List.of()
-                    : List.copyOf(candidates);
+            candidates = candidates == null ? List.of() : List.copyOf(candidates);
+            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
+        }
 
-            evidenceRefs = evidenceRefs == null
-                    ? List.of()
-                    : List.copyOf(evidenceRefs);
+        private static Result from(
+                SearchInternalEntitiesResponse response,
+                InternalContextMapper mapper
+        ) {
+            Objects.requireNonNull(response, "response must not be null");
+            Objects.requireNonNull(mapper, "mapper must not be null");
 
-            warnings = warnings == null
-                    ? List.of()
-                    : List.copyOf(warnings);
+            return new Result(
+                    response.getResultsList(),
+                    mapper.fromSearch(response),
+                    response.getAmbiguous(),
+                    response.getWarningsList()
+            );
         }
     }
 }

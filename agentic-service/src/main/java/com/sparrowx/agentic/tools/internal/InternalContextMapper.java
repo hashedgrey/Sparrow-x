@@ -7,7 +7,6 @@ import com.sparrowx.internal.grpc.InternalGraph;
 import com.sparrowx.internal.grpc.InternalGraphNode;
 import com.sparrowx.internal.grpc.InternalGraphRelationship;
 import com.sparrowx.internal.grpc.ReadInternalCompanyGraphResponse;
-import com.sparrowx.internal.grpc.ReadLearningGraphResponse;
 import com.sparrowx.internal.grpc.SearchInternalEntitiesResponse;
 
 import java.util.ArrayList;
@@ -45,16 +44,6 @@ public final class InternalContextMapper {
         return fromGraph(response.getGraph());
     }
 
-    public List<EvidenceRef> fromLearningGraph(
-            ReadLearningGraphResponse response) {
-
-        if (response == null || !response.hasGraph()) {
-            throw new IllegalArgumentException(
-                    "learning graph response must contain a graph");
-        }
-
-        return fromGraph(response.getGraph());
-    }
 
     public EvidenceRef fromEntity(InternalEntitySearchResult entity) {
         if (entity == null || entity.getEntityId().isBlank()) {
@@ -134,6 +123,10 @@ public final class InternalContextMapper {
                         .stream()
                         .map(this::relationshipAttributes)
                         .toList());
+        attributes.put(
+                "displayFacts",
+                GraphEvidenceProjector.project(graph)
+        );
 
         return new EvidenceRef(
                 "internal-graph:" + graph.getGraphId(),
@@ -175,14 +168,18 @@ public final class InternalContextMapper {
                 nodeAttributes(node));
     }
 
-    private Map<String, Object> nodeAttributes(
-            InternalGraphNode node) {
-
+    private Map<String, Object> nodeAttributes(InternalGraphNode node) {
         Map<String, Object> attributes = new LinkedHashMap<>();
+
+        // Preserve structured PostgreSQL graph metadata.
+        attributes.putAll(node.getAttributesMap());
+
         attributes.put("nodeId", node.getNodeId());
+        attributes.put("entityId", node.getEntityId());
         attributes.put("nodeType", node.getNodeType().name());
         attributes.put("label", node.getLabel());
         attributes.put("summary", node.getSummary());
+
 
         return Map.copyOf(attributes);
     }

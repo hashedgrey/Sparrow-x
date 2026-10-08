@@ -7,6 +7,7 @@ import com.sparrowx.agentic.tools.internal.InternalContextTool;
 import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder;
 import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder.GraphSpec;
 import com.sparrowx.internal.grpc.InternalGraph;
+import com.sparrowx.internal.grpc.InternalGraphNodeType;
 import com.sparrowx.internal.grpc.ReadInternalCompanyGraphRequest;
 import com.sparrowx.internal.grpc.ReadInternalCompanyGraphResponse;
 
@@ -55,16 +56,58 @@ public final class ReadInternalCompanyGraphAction {
         ReadInternalCompanyGraphResponse response =
                 contextTool.readCompanyGraph(context, request);
 
+        System.out.printf(
+                "COMPANY GRAPH root=%s depth=%d nodes=%d edges=%d%n",
+                spec.rootEntityId(),
+                spec.depth(),
+                response.getGraph().getNodesCount(),
+                response.getGraph().getRelationshipsCount()
+        );
+
+        response.getGraph().getNodesList().forEach(node ->
+                System.out.printf(
+                        "GRAPH NODE id=%s type=%s label=%s summary=%s%n",
+                        node.getEntityId(),
+                        node.getNodeType(),
+                        node.getLabel(),
+                        node.getSummary()
+                )
+        );
+
+        response.getGraph().getRelationshipsList().forEach(edge ->
+                System.out.printf(
+                        "GRAPH EDGE %s -> %s relation=%s%n",
+                        edge.getFromNodeId(),
+                        edge.getToNodeId(),
+                        edge.getRelationshipType()
+                )
+        );
+
         if (!response.hasGraph()) {
-            throw new IllegalStateException(
-                    "Internal Service returned no company graph"
-            );
+            throw new IllegalStateException("Internal Service returned no company graph");
         }
 
+
+// ADD DIAGNOSTIC HERE
+        response.getGraph().getNodesList().stream()
+                .filter(node -> node.getNodeType() ==
+                        InternalGraphNodeType.INTERNAL_GRAPH_NODE_TYPE_ENGINEER)
+                .forEach(node ->
+                        System.out.printf(
+                                "ENGINEER id=%s name=%s role=%s attributes=%s%n",
+                                node.getEntityId(),
+                                node.getLabel(),
+                                node.getAttributesOrDefault("role", "<missing>"),
+                                node.getAttributesMap()
+                        )
+                );
+
+// Existing mapping/return logic follows.
         return new Result(
                 response.getGraph(),
                 contextMapper.fromCompanyGraph(response)
         );
+
     }
 
     public record Result(
