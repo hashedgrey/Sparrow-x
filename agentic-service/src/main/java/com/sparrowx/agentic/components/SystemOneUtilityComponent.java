@@ -51,27 +51,100 @@ public final class SystemOneUtilityComponent {
     public UtilityAssessment evaluate(
             UtilityRequest request
     ) {
-        Objects.requireNonNull(
-                request,
-                "request must not be null"
-        );
+        Objects.requireNonNull(request, "request must not be null");
+        DecisionResponse response = decisionClient.evaluate(state(request), questions());
 
-        DecisionResponse response =
-                decisionClient.evaluate(
-                        state(request),
-                        questions()
-                );
+        double documentUtility = response.noulValue(DOCUMENT);
+        double internalUtility = response.noulValue(INTERNAL);
+        double companyGraphUtility = response.noulValue(COMPANY_GRAPH);
+        double learningGraphUtility = response.noulValue(LEARNING_GRAPH);
+        double synthesisUtility = response.noulValue(SYNTHESIZE);
+
+        /*
+         * Frozen mission intent establishes the initial capability boundary.
+         *
+         * Hybrid may unlock document retrieval later, but only when already
+         * collected evidence explicitly exposes a document dependency.
+         */
+        if (!request.requiresDocumentEvidence()
+                && !hasDocumentDiscoverySignal(
+                request.evidence()
+        )) {
+
+            documentUtility = 0.0d;
+        }
+
+        if (!request.requiresInternalContext()
+                && !hasInternalDiscoverySignal(
+                request.evidence()
+        )) {
+
+            internalUtility = 0.0d;
+        }
+
+        /*
+         * Graph traversal is impossible/use-less until entity resolution
+         * produced an actual root.
+         */
+        if (request.resolvedEntityId().isBlank()) {
+            companyGraphUtility = 0.0d;
+            learningGraphUtility = 0.0d;
+        }
 
         return new UtilityAssessment(
-                response.noulValue(DOCUMENT),
-                response.noulValue(INTERNAL),
-                response.noulValue(COMPANY_GRAPH),
-                response.noulValue(LEARNING_GRAPH),
-                response.noulValue(SYNTHESIZE),
+                documentUtility,
+                internalUtility,
+                companyGraphUtility,
+                learningGraphUtility,
+                synthesisUtility,
                 decisionClient.provider(),
                 safe(response.model()),
                 safe(response.requestId())
         );
+    }
+
+    private static boolean hasDocumentDiscoverySignal(
+            List<Map<String, Object>> evidence
+    ) {
+        return hasSourceSignal(
+                evidence,
+                "DOCUMENT"
+        );
+    }
+
+    private static boolean hasInternalDiscoverySignal(
+            List<Map<String, Object>> evidence
+    ) {
+        return hasSourceSignal(
+                evidence,
+                "INTERNAL"
+        );
+    }
+
+    private static boolean hasSourceSignal(List<Map<String, Object>> evidence, String token) {
+        if (evidence == null || evidence.isEmpty()) {
+            return false;
+        }
+
+        for (Map<String, Object> item : evidence) {
+            Object signalsValue = item.get("signals");
+
+            if (!(signalsValue instanceof List<?> signals)) {
+                continue;
+            }
+
+            for (Object signalValue : signals) {
+                if (!(signalValue instanceof Map<?, ?> signal)) {
+                    continue;
+                }
+                Object sourceType = signal.get("sourceType");
+                if (sourceType instanceof String text && text.contains(token)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /*
@@ -95,6 +168,8 @@ public final class SystemOneUtilityComponent {
         state.put("allowedTools", request.allowedTools());
         state.put("requireCitations", request.requireCitations());
         state.put("requireVerification", request.requireVerification());
+        state.put("requiresDocumentEvidence", request.requiresDocumentEvidence());
+        state.put("requiresInternalContext", request.requiresInternalContext());
         return Map.copyOf(state);
     }
 
@@ -252,9 +327,11 @@ public final class SystemOneUtilityComponent {
             String resolvedEntityType,
             Set<String> alreadyExecutedActions,
             Set<String> allowedTools,
+            boolean requiresDocumentEvidence,
+            boolean requiresInternalContext,
             boolean requireCitations,
             boolean requireVerification
-    ) {
+    )  {
         public UtilityRequest {
             query =
                     requireText(

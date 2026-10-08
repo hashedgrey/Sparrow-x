@@ -14,12 +14,12 @@ import java.util.Set;
  *
  * MissionPath controls durability characteristics.
  * PlannerMode controls Embabel planning behavior.
+ * Hard semantic requirements belong here so utility planning cannot bypass them.
  */
 @JsonIgnoreProperties(
-        value = {"governed", "retrieval"},
+        value = {"governed", "retrieval", "internalTraversal"},
         ignoreUnknown = true
 )
-
 public record MissionIntent(
         String missionId,
         String objective,
@@ -30,6 +30,7 @@ public record MissionIntent(
         List<String> requiredOutputSections,
         boolean requiresDocumentEvidence,
         boolean requiresInternalContext,
+        boolean requiresCompanyGraph,
         boolean requiresHumanReview,
         boolean requiresCitations,
         boolean requiresVerification,
@@ -40,71 +41,65 @@ public record MissionIntent(
 ) {
 
     public MissionIntent {
-        missionId =
-                requireText(
-                        missionId,
-                        "missionId"
-                );
+        missionId = requireText(missionId, "missionId");
+        objective = requireText(objective, "objective");
+        selectedPath = Objects.requireNonNull(selectedPath, "selectedPath must not be null");
+        plannerMode = Objects.requireNonNull(plannerMode, "plannerMode must not be null");
 
-        objective =
-                requireText(
-                        objective,
-                        "objective"
-                );
+        // Graph traversal is an internal-data requirement by definition.
+        if (requiresCompanyGraph) {
+            requiresInternalContext = true;
+        }
 
-        selectedPath =
-                Objects.requireNonNull(
-                        selectedPath,
-                        "selectedPath must not be null"
-                );
+        targetEntities = immutableSet(targetEntities);
+        topics = immutableSet(topics);
+        requiredOutputSections = immutableList(requiredOutputSections);
+        allowedTools = immutableSet(allowedTools);
+        allowedSourceServices = immutableSet(allowedSourceServices);
+        attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
+    }
 
-        plannerMode =
-                Objects.requireNonNull(
-                        plannerMode,
-                        "plannerMode must not be null"
-                );
-
-        targetEntities =
-                targetEntities == null
-                        ? Set.of()
-                        : Set.copyOf(
-                        targetEntities
-                );
-
-        topics =
-                topics == null
-                        ? Set.of()
-                        : Set.copyOf(
-                        topics
-                );
-
-        requiredOutputSections =
-                requiredOutputSections == null
-                        ? List.of()
-                        : List.copyOf(
-                        requiredOutputSections
-                );
-
-        allowedTools =
-                allowedTools == null
-                        ? Set.of()
-                        : Set.copyOf(
-                        allowedTools
-                );
-
-        allowedSourceServices =
-                allowedSourceServices == null
-                        ? Set.of()
-                        : Set.copyOf(
-                        allowedSourceServices
-                );
-
-        attributes =
-                attributes == null
-                        ? Map.of()
-                        : Map.copyOf(
-                        attributes
-                );
+    /**
+     * Backward-compatible constructor for existing call sites that predate
+     * the explicit company-graph requirement.
+     */
+    public MissionIntent(
+            String missionId,
+            String objective,
+            MissionPath selectedPath,
+            PlannerMode plannerMode,
+            Set<String> targetEntities,
+            Set<String> topics,
+            List<String> requiredOutputSections,
+            boolean requiresDocumentEvidence,
+            boolean requiresInternalContext,
+            boolean requiresHumanReview,
+            boolean requiresCitations,
+            boolean requiresVerification,
+            boolean allowsExternalSources,
+            Set<String> allowedTools,
+            Set<String> allowedSourceServices,
+            Map<String, Object> attributes
+    ) {
+        this(
+                missionId,
+                objective,
+                selectedPath,
+                plannerMode,
+                targetEntities,
+                topics,
+                requiredOutputSections,
+                requiresDocumentEvidence,
+                requiresInternalContext,
+                false,
+                requiresHumanReview,
+                requiresCitations,
+                requiresVerification,
+                allowsExternalSources,
+                allowedTools,
+                allowedSourceServices,
+                attributes
+        );
     }
 
     @JsonIgnore
@@ -113,22 +108,27 @@ public record MissionIntent(
     }
 
     @JsonIgnore
+    public boolean requiresInternalTraversal() {
+        return requiresCompanyGraph;
+    }
+
+    @JsonIgnore
     public boolean isGoverned() {
         return requiresHumanReview || requiresVerification || requiresCitations;
     }
 
-    private static String requireText(
-            String value,
-            String field
-    ) {
-        if (value == null
-                || value.isBlank()) {
+    private static <T> Set<T> immutableSet(Set<T> values) {
+        return values == null ? Set.of() : Set.copyOf(values);
+    }
 
-            throw new IllegalArgumentException(
-                    field + " must not be blank"
-            );
+    private static <T> List<T> immutableList(List<T> values) {
+        return values == null ? List.of() : List.copyOf(values);
+    }
+
+    private static String requireText(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " must not be blank");
         }
-
         return value.trim();
     }
 }

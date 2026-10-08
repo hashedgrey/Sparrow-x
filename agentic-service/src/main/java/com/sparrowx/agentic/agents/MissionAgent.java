@@ -9,6 +9,7 @@ import com.embabel.agent.api.common.PlannerType;
 import com.embabel.agent.core.ActionRetryPolicy;
 import com.embabel.agent.core.Blackboard;
 import com.sparrowx.agentic.actions.synthesis.BuildCitationsAction;
+import com.sparrowx.agentic.components.InternalSearchSpecResolver;
 import com.sparrowx.agentic.components.SystemOneUtilityComponent;
 import com.sparrowx.agentic.components.SystemOneUtilityComponent.UtilityAssessment;
 import com.sparrowx.agentic.components.SystemOneUtilityComponent.UtilityRequest;
@@ -25,17 +26,19 @@ import com.sparrowx.agentic.steps.BuildDocumentEvidenceStep;
 import com.sparrowx.agentic.steps.ResolveInternalContextStep;
 import com.sparrowx.agentic.tools.document.DocumentEvidenceRequestBuilder.BuildSpec;
 import com.sparrowx.agentic.tools.document.DocumentSpanSearchRequestBuilder.Scope;
-import com.sparrowx.agentic.tools.internal.InternalEntitySearchRequestBuilder.SearchSpec;
 import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder.GraphSpec;
 import com.sparrowx.document.proto.DocumentEvidenceGraphProto;
 import com.sparrowx.document.proto.EvidenceGoalProto;
 import com.sparrowx.document.proto.RetrievalModeProto;
 import com.sparrowx.internal.grpc.InternalGraphNodeType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -62,6 +65,8 @@ import java.util.Set;
 )
 public final class MissionAgent {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(MissionAgent.class);
+
     private static final String DOCUMENT_BUILD = "document.evidence.build";
     private static final String INTERNAL_SEARCH = "internal.entities.search";
     private static final String COMPANY_GRAPH = "internal.company-graph.read";
@@ -73,28 +78,28 @@ public final class MissionAgent {
     private final BuildCitationsAction citationsAction;
     private final SynthesisComponent synthesisComponent;
     private final MissionEventPublisher eventPublisher;
+    private final InternalSearchSpecResolver internalSearchSpecResolver;
 
     public MissionAgent(
             SystemOneUtilityComponent utilityComponent,
             BuildDocumentEvidenceStep documentStep,
             ResolveInternalContextStep internalStep,
+            InternalSearchSpecResolver internalSearchSpecResolver,
             BuildCitationsAction citationsAction,
             SynthesisComponent synthesisComponent,
             MissionEventPublisher eventPublisher
     ) {
-        this.utilityComponent = Objects.requireNonNull(utilityComponent,
-                "utilityComponent must not be null");
-
+        this.utilityComponent =
+                Objects.requireNonNull(utilityComponent, "utilityComponent must not be null");
         this.documentStep = Objects.requireNonNull(documentStep, "documentStep must not be null");
         this.internalStep = Objects.requireNonNull(internalStep, "internalStep must not be null");
+
+        this.internalSearchSpecResolver =
+                Objects.requireNonNull(internalSearchSpecResolver, "internalSearchSpecResolver must not be null");
+
         this.citationsAction = Objects.requireNonNull(citationsAction, "citationsAction must not be null");
-
-        this.synthesisComponent = Objects.requireNonNull(synthesisComponent,
-                "synthesisComponent must not be null");
-
-        this.eventPublisher = Objects.requireNonNull(eventPublisher,
-                "eventPublisher must not be null"
-        );
+        this.synthesisComponent = Objects.requireNonNull(synthesisComponent, "synthesisComponent must not be null");
+        this.eventPublisher = Objects.requireNonNull(eventPublisher, "eventPublisher must not be null");
     }
 
     /*
@@ -123,35 +128,6 @@ public final class MissionAgent {
 
         MissionIntent intent = input.intent();
         DocumentScope scope = documentScope(input, intent);
-        if (scope.empty()) {
-            String summary = "No document scope was available";
-
-            Map<String, Object> attributes = Map.of("noDocumentScope", true);
-
-            UtilityAssessment utility =
-                    reassess(
-                            input,
-                            context,
-                            DOCUMENT_BUILD,
-                            summary,
-                            attributes,
-                            List.of(),
-                            "",
-                            ""
-                    );
-
-            return new DocumentEvidenceState(
-                    false,
-                    null,
-                    List.of(),
-                    List.of("Document evidence was requested but no "
-                                    + "document scope could be resolved."
-                    ),
-                    summary,
-                    attributes,
-                    utility
-            );
-        }
 
         String requestId = effectId(input, "document-evidence");
 
@@ -276,38 +252,68 @@ public final class MissionAgent {
             MissionRunInput input,
             Blackboard blackboard
     ) {
-        if (input == null || !capabilityAllowed(
-                input, DOCUMENT_BUILD
+        if (input == null
+                || !capabilityAllowed(
+                input,
+                DOCUMENT_BUILD
         )) {
-            return 0.0;
+
+            return 0.0d;
+        }
+        if (blackboard != null
+                && blackboard.last(MissionResult.class) != null) {
+            return 0.0d;
         }
 
-        /*
-         * Required evidence is a hard execution requirement, not a utility
-         * preference.
-         */
-        if (input.intent().requiresDocumentEvidence() && (blackboard == null || blackboard.last(
-                DocumentEvidenceState.class
+        MissionIntent intent = input.intent();
+
+        if (intent.requiresDocumentEvidence() && (blackboard == null || blackboard.last(DocumentEvidenceState.class
         ) == null)) {
 
-            return 1.0;
+            return 1.0d;
         }
 
-        UtilityAssessment latest = latestUtility(blackboard);
+        UtilityAssessment latest =
+                latestUtility(
+                        blackboard
+                );
 
+        /*
+         * After evidence exists, Hybrid/System-1 can dynamically unlock
+         * document retrieval if collected evidence exposed a document need.
+         */
         if (latest != null) {
-            return clamp(latest.documentUtility());
-        }
+            if (!intent.requiresDocumentEvidence()
+                    && !hasDocumentDiscoverySignal(
+                    blackboard
+            )) {
 
-        Object initial =
-                input.intent().attributes().get("documentUtility");
+                return 0.0d;
+            }
 
-        if (initial instanceof Number value) {
-            return clamp(value.doubleValue()
+            return clamp(
+                    latest.documentUtility()
             );
         }
 
-        return input.intent().requiresDocumentEvidence() ? 0.95 : 0.0;
+        /*
+         * Before any evidence exists, frozen intent is authoritative.
+         */
+        if (!intent.requiresDocumentEvidence()) {
+            return 0.0d;
+        }
+
+        Object initial =
+                intent.attributes()
+                        .get("documentUtility");
+
+        if (initial instanceof Number value) {
+            return clamp(
+                    value.doubleValue()
+            );
+        }
+
+        return 0.95d;
     }
 
     /*
@@ -337,46 +343,46 @@ public final class MissionAgent {
                 "context must not be null"
         );
 
-        SearchSpec spec =
-                new SearchSpec(
-                        effectId(
-                                input,
-                                "internal-search"
-                        ),
-
-                        input.request()
-                                .query(),
-
-                        List.of(),
-
-                        "",
-
-                        InternalGraphNodeType
-                                .INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED,
-
-                        0,
-
-                        20,
-
-                        true,
-
-                        Map.of()
+        InternalSearchSpecResolver.Resolution resolution =
+                internalSearchSpecResolver.resolve(
+                        new InternalSearchSpecResolver.Request(
+                                input.missionId(),
+                                effectId(input, "internal-search"),
+                                input.request().query(),
+                                input.intent().requiresCompanyGraph()
+                        )
                 );
+        LOGGER.info(
+                "Internal root search resolved query=[{}] nodeTypes={} traversalRequired={}",
+                resolution.spec().query(),
+                resolution.spec().allowedNodeTypes(),
+                input.intent().requiresCompanyGraph()
+        );
+
+        LOGGER.debug(
+                "Internal search query=[{}] types={} strategy={}",
+                resolution.spec().query(),
+                resolution.spec().allowedNodeTypes(),
+                resolution.strategy()
+        );
 
         ResolveInternalContextStep.Result result =
-                internalStep.search(
-                        input.request()
-                                .context(),
-                        spec
-                );
+                internalStep.search(input.request().context(), resolution.spec());
 
-        boolean ambiguous =
-                Boolean.TRUE.equals(
-                        result.attributes()
-                                .get(
-                                        "ambiguous"
-                                )
-                );
+        LOGGER.info(
+                "Internal root search result entityId=[{}] nodeType={} attributes={} warnings={}",
+                result.resolvedEntityId(),
+                result.resolvedNodeType(),
+                result.attributes(),
+                result.warnings()
+        );
+
+        Map<String, Object> attributes = new LinkedHashMap<>(result.attributes());
+        attributes.putAll(resolution.debug());
+        Map<String, Object> resolvedAttributes = Map.copyOf(attributes);
+
+
+        boolean ambiguous = Boolean.TRUE.equals(result.attributes().get("ambiguous"));
 
         UtilityAssessment utility =
                 reassess(
@@ -384,7 +390,7 @@ public final class MissionAgent {
                         context,
                         INTERNAL_SEARCH,
                         result.summary(),
-                        result.attributes(),
+                        resolvedAttributes,
                         result.evidenceRefs(),
                         result.resolvedEntityId(),
                         result.resolvedNodeType()
@@ -396,7 +402,7 @@ public final class MissionAgent {
                 result.evidenceRefs(),
                 result.warnings(),
                 result.summary(),
-                result.attributes(),
+                resolvedAttributes,
                 result.resolvedEntityId(),
                 result.resolvedNodeType(),
                 ambiguous,
@@ -415,20 +421,25 @@ public final class MissionAgent {
                 INTERNAL_SEARCH
         )) {
 
-            return 0.0;
+            return 0.0d;
+        }
+        if (blackboard != null
+                && blackboard.last(MissionResult.class) != null) {
+            return 0.0d;
         }
 
+        MissionIntent intent = input.intent();
+
         /*
-         * Required internal context is also a hard execution requirement.
+         * Required internal context is a hard execution requirement.
          */
-        if (input.intent()
-                .requiresInternalContext()
+        if (intent.requiresInternalContext()
                 && (blackboard == null
                 || blackboard.last(
                 InternalSearchState.class
         ) == null)) {
 
-            return 1.0;
+            return 1.0d;
         }
 
         UtilityAssessment latest =
@@ -442,9 +453,15 @@ public final class MissionAgent {
             );
         }
 
+        /*
+         * Before any evidence exists, frozen intent is authoritative.
+         */
+        if (!intent.requiresInternalContext()) {
+            return 0.0d;
+        }
+
         Object initial =
-                input.intent()
-                        .attributes()
+                intent.attributes()
                         .get(
                                 "internalUtility"
                         );
@@ -455,10 +472,7 @@ public final class MissionAgent {
             );
         }
 
-        return input.intent()
-                .requiresInternalContext()
-                ? 0.90
-                : 0.0;
+        return 0.90d;
     }
 
     /*
@@ -504,17 +518,10 @@ public final class MissionAgent {
 
         GraphSpec spec =
                 new GraphSpec(
-                        effectId(
-                                input,
-                                "company-graph"
-                        ),
-
+                        effectId(input, "company-graph"),
                         searchState.resolvedEntityId(),
-
                         searchState.resolvedNodeType(),
-
-                        1,
-
+                        3,
                         50
                 );
 
@@ -564,17 +571,22 @@ public final class MissionAgent {
 
             return 0.0;
         }
+        if (blackboard != null
+                && blackboard.last(MissionResult.class) != null) {
+            return 0.0d;
+        }
 
-        UtilityAssessment latest =
-                latestUtility(
-                        blackboard
-                );
+        if (input.intent().requiresCompanyGraph()
+                && (blackboard == null
+                || blackboard.last(CompanyGraphState.class) == null)) {
+            return 1.0d;
+        }
+
+        UtilityAssessment latest = latestUtility(blackboard);
 
         return latest == null
-                ? 0.60
-                : clamp(
-                latest.companyGraphUtility()
-        );
+                ? 0.60d
+                : clamp(latest.companyGraphUtility());
     }
 
     /*
@@ -583,115 +595,9 @@ public final class MissionAgent {
      * ------------------------------------------------------------------
      */
 
-    @Action(
-            description =
-                    "Expand a resolved entity through the learning graph",
-            readOnly = true,
-            cost = 0.15,
-            valueMethod = "learningGraphValue"
-    )
-    public LearningGraphState readLearningGraph(
-            MissionRunInput input,
-            InternalSearchState searchState,
-            OperationContext context
-    ) {
-        Objects.requireNonNull(
-                input,
-                "input must not be null"
-        );
 
-        Objects.requireNonNull(
-                searchState,
-                "searchState must not be null"
-        );
 
-        Objects.requireNonNull(
-                context,
-                "context must not be null"
-        );
 
-        if (!searchState.hasResolvedEntity()) {
-            return LearningGraphState.skipped(
-                    "No unique internal entity was available "
-                            + "for learning graph expansion",
-                    searchState.utility()
-            );
-        }
-
-        GraphSpec spec =
-                new GraphSpec(
-                        effectId(
-                                input,
-                                "learning-graph"
-                        ),
-
-                        searchState.resolvedEntityId(),
-
-                        searchState.resolvedNodeType(),
-
-                        1,
-
-                        50
-                );
-
-        ResolveInternalContextStep.Result result =
-                internalStep.readLearningGraph(
-                        input.request()
-                                .context(),
-                        spec
-                );
-
-        UtilityAssessment utility =
-                reassess(
-                        input,
-                        context,
-                        LEARNING_GRAPH,
-                        result.summary(),
-                        result.attributes(),
-                        result.evidenceRefs(),
-                        searchState.resolvedEntityId(),
-                        searchState.resolvedNodeType()
-                                .name()
-                );
-
-        return new LearningGraphState(
-                true,
-                result.evidenceRefs(),
-                result.warnings(),
-                result.summary(),
-                result.attributes(),
-                utility
-        );
-    }
-
-    @Cost(name = "learningGraphValue")
-    public double learningGraphValue(
-            MissionRunInput input,
-            InternalSearchState searchState,
-            Blackboard blackboard
-    ) {
-        if (input == null
-                || searchState == null
-                || !searchState.hasResolvedEntity()
-                || !capabilityAllowed(
-                input,
-                LEARNING_GRAPH
-        )) {
-
-            return 0.0;
-        }
-
-        UtilityAssessment latest =
-                latestUtility(
-                        blackboard
-                );
-
-        return latest == null
-                ? 0.40
-                : clamp(
-                latest.learningGraphUtility()
-        );
-    }
 
     /*
      * ------------------------------------------------------------------
@@ -742,18 +648,30 @@ public final class MissionAgent {
             return insufficient;
         }
 
+        List<EvidenceState> groundingStates =
+                selectGroundingStates(
+                        input.intent(),
+                        evidenceStates
+                );
+
         List<EvidenceRef> rawEvidence =
-                evidenceStates.stream()
+                groundingStates.stream()
                         .flatMap(state ->
                                 state.evidenceRefs()
                                         .stream()
                         )
                         .toList();
 
+        List<EvidenceRef> selectedEvidence =
+                selectGroundingEvidence(
+                        input.intent(),
+                        rawEvidence
+                );
+
         List<EvidenceRef> evidenceRefs;
         List<Citation> citations;
 
-        if (rawEvidence.isEmpty()) {
+        if (selectedEvidence.isEmpty()) {
             evidenceRefs =
                     List.of();
 
@@ -761,81 +679,51 @@ public final class MissionAgent {
                     List.of();
 
         } else {
+            /*
+             * BuildCitationsAction remains a deterministic formatter. It does
+             * not decide semantic relevance. MissionAgent selects the
+             * authoritative grounding set first, then BuildSpec bounds the
+             * candidate set and assigns stable citation labels.
+             */
             BuildCitationsAction.Result normalized =
                     citationsAction.execute(
                             new BuildCitationsAction.BuildSpec(
-                                    rawEvidence,
-                                    excerptsByEvidenceId(
-                                            rawEvidence
-                                    )
-                            )
+                                    selectedEvidence, excerptsByEvidenceId(selectedEvidence), 8)
                     );
 
-            evidenceRefs =
-                    normalized.evidenceRefs();
-
+            evidenceRefs = normalized.evidenceRefs();
             citations =
-                    input.intent()
-                            .requiresCitations()
-                            ? normalized.citations()
-                            : List.of();
+                    input.intent().requiresCitations() ? normalized.citations() : List.of();
         }
 
         List<String> warnings =
-                evidenceStates.stream()
-                        .flatMap(state ->
-                                state.warnings()
-                                        .stream()
-                        )
+                groundingStates.stream()
+                        .flatMap(state -> state.warnings().stream())
                         .distinct()
                         .toList();
 
         List<Map<String, Object>> observations =
-                evidenceStates.stream()
-                        .filter(
-                                EvidenceState::performed
-                        )
-                        .map(
-                                MissionAgent::observation
-                        )
+                groundingStates.stream()
+                        .filter(EvidenceState::performed)
+                        .map(MissionAgent::observation)
                         .toList();
 
         SynthesisRequest request =
                 new SynthesisRequest(
                         input.missionId(),
-
                         true,
-
                         input.intent(),
-
                         observations,
-
                         evidenceRefs,
-
                         citations,
-
                         List.of(),
-
-                        input.intent()
-                                .requiredOutputSections(),
+                        input.intent().requiredOutputSections(),
 
                         Map.of(
-                                "query",
-                                input.request()
-                                        .query(),
-
-                                "warnings",
-                                warnings,
-
-                                "selectedPath",
-                                input.intent()
-                                        .selectedPath()
-                                        .name(),
-
-                                "plannerMode",
-                                input.intent()
-                                        .plannerMode()
-                                        .name()
+                                "query", input.request().query(),
+                                "warnings", warnings,
+                                "selectedPath", input.intent().selectedPath().name(),
+                                "plannerMode", input.intent().plannerMode().name()
                         )
                 );
 
@@ -844,28 +732,22 @@ public final class MissionAgent {
                         request,
                         context,
                         delta ->
-                                eventPublisher.publish(
-                                        input.tenantId(),
-                                        delta
-                                )
+                                eventPublisher.publish(input.tenantId(), delta)
                 );
 
-        Map<String, Object> debug =
-                new LinkedHashMap<>(
-                        draft.debugSummary()
-                );
-
-        debug.put(
-                "intentEngine",
-                "system-one"
+        // Labels have already streamed to the UI. Filter source entries but
+        // never relabel the completed answer independently of that stream.
+        List<Citation> usedCitations = BuildCitationsAction.retainUsedCitations(
+                citations,
+                draft.finalAnswer(),
+                draft.executiveSummary()
         );
 
-        debug.put(
-                "embabelPlanner",
-                input.intent()
-                        .plannerMode()
-                        .name()
-        );
+        Map<String, Object> debug = new LinkedHashMap<>(draft.debugSummary());
+        debug.put("candidateCitationCount", citations.size());
+        debug.put("usedCitationCount", usedCitations.size());
+        debug.put("intentEngine", "system-one");
+        debug.put("embabelPlanner", input.intent().plannerMode().name());
 
         debug.put(
                 "embabelGraph",
@@ -880,12 +762,8 @@ public final class MissionAgent {
         debug.put(
                 "executedEvidenceActions",
                 evidenceStates.stream()
-                        .filter(
-                                EvidenceState::performed
-                        )
-                        .map(
-                                MissionAgent::actionName
-                        )
+                        .filter(EvidenceState::performed)
+                        .map(MissionAgent::actionName)
                         .toList()
         );
 
@@ -900,38 +778,17 @@ public final class MissionAgent {
             debug.put(
                     "finalSystemOneUtility",
                     Map.of(
-                            "document",
-                            latest.documentUtility(),
-
-                            "internal",
-                            latest.internalUtility(),
-
-                            "companyGraph",
-                            latest.companyGraphUtility(),
-
-                            "learningGraph",
-                            latest.learningGraphUtility(),
-
-                            "synthesis",
-                            latest.synthesisUtility()
+                            "document", latest.documentUtility(),
+                            "internal", latest.internalUtility(),
+                            "companyGraph", latest.companyGraphUtility(),
+                            "synthesis", latest.synthesisUtility()
                     )
             );
 
-            debug.put(
-                    "systemOneUtilityModel",
-                    latest.model()
-            );
-
-            debug.put(
-                    "systemOneUtilityRequestId",
-                    latest.requestId()
-            );
+            debug.put("systemOneUtilityModel", latest.model());
+            debug.put("systemOneUtilityRequestId", latest.requestId());
         }
-
-        debug.put(
-                "warnings",
-                warnings
-        );
+        debug.put("warnings", warnings);
 
         return new MissionResult(
                 input.missionId(),
@@ -941,7 +798,7 @@ public final class MissionAgent {
                 draft.findings(),
                 draft.recommendations(),
                 evidenceRefs,
-                citations,
+                usedCitations,
                 request.governanceDecisions(),
                 draft.structuredOutput(),
                 Map.copyOf(debug)
@@ -954,50 +811,55 @@ public final class MissionAgent {
             Blackboard blackboard
     ) {
         if (input == null) {
-            return 0.0;
+            return 0.0d;
         }
 
-        MissionIntent intent =
-                input.intent();
+        if (blackboard != null
+                && blackboard.last(MissionResult.class) != null) {
+            return 0.0d;
+        }
 
-        /*
-         * Hard grounding boundary.
-         *
-         * A required retrieval action must have been attempted before
-         * synthesis is eligible.
-         */
+        MissionIntent intent = input.intent();
+
         if (intent.requiresDocumentEvidence()
                 && (blackboard == null
-                || blackboard.last(
-                DocumentEvidenceState.class
-        ) == null)) {
-
-            return 0.0;
+                || blackboard.last(DocumentEvidenceState.class) == null)) {
+            return 0.0d;
         }
 
-        if (intent.requiresInternalContext()
-                && (blackboard == null
-                || blackboard.last(
-                InternalSearchState.class
-        ) == null)) {
+        InternalSearchState internalState =
+                blackboard == null
+                        ? null
+                        : blackboard.last(InternalSearchState.class);
 
-            return 0.0;
+        if (intent.requiresInternalContext() && internalState == null) {
+            return 0.0d;
+        }
+
+        /*
+         * Hard semantic prerequisite: when the frozen intent requires a
+         * company-graph relationship, utility may rank actions only after the
+         * required traversal has had a chance to run. If entity resolution
+         * failed or is ambiguous, completion is allowed so it can terminate
+         * deterministically with insufficient grounded evidence.
+         */
+        if (intent.requiresCompanyGraph()
+                && internalState != null
+                && internalState.hasResolvedEntity()
+                && capabilityAllowed(input, COMPANY_GRAPH)
+                && blackboard.last(CompanyGraphState.class) == null) {
+            return 0.0d;
         }
 
         if (!intent.requiresRetrieval()) {
-            return 0.95;
+            return 0.95d;
         }
 
-        UtilityAssessment latest =
-                latestUtility(
-                        blackboard
-                );
+        UtilityAssessment latest = latestUtility(blackboard);
 
         return latest == null
-                ? 0.50
-                : clamp(
-                latest.synthesisUtility()
-        );
+                ? 0.50d
+                : clamp(latest.synthesisUtility());
     }
 
     /*
@@ -1009,8 +871,7 @@ public final class MissionAgent {
     public sealed interface EvidenceState
             permits DocumentEvidenceState,
             InternalSearchState,
-            CompanyGraphState,
-            LearningGraphState {
+            CompanyGraphState{
 
         boolean performed();
 
@@ -1043,30 +904,10 @@ public final class MissionAgent {
                             evidenceRefs
                     );
 
-            warnings =
-                    warnings == null
-                            ? List.of()
-                            : List.copyOf(
-                            warnings
-                    );
-
-            summary =
-                    summary == null
-                            ? ""
-                            : summary;
-
-            attributes =
-                    attributes == null
-                            ? Map.of()
-                            : Map.copyOf(
-                            attributes
-                    );
-
-            utility =
-                    Objects.requireNonNull(
-                            utility,
-                            "utility must not be null"
-                    );
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
+            summary = summary == null ? "" : summary;
+            attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
+            utility = Objects.requireNonNull(utility, "utility must not be null");
         }
     }
 
@@ -1083,48 +924,18 @@ public final class MissionAgent {
     ) implements EvidenceState {
 
         public InternalSearchState {
-            evidenceRefs =
-                    evidenceRefs == null
-                            ? List.of()
-                            : List.copyOf(
-                            evidenceRefs
-                    );
+            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
 
-            warnings =
-                    warnings == null
-                            ? List.of()
-                            : List.copyOf(
-                            warnings
-                    );
-
-            summary =
-                    summary == null
-                            ? ""
-                            : summary;
-
-            attributes =
-                    attributes == null
-                            ? Map.of()
-                            : Map.copyOf(
-                            attributes
-                    );
-
-            resolvedEntityId =
-                    resolvedEntityId == null
-                            ? ""
-                            : resolvedEntityId;
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
+            summary = summary == null ? "" : summary;
+            attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
+            resolvedEntityId = resolvedEntityId == null ? "" : resolvedEntityId;
 
             resolvedNodeType =
-                    resolvedNodeType == null
-                            ? InternalGraphNodeType
-                            .INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED
+                    resolvedNodeType == null ? InternalGraphNodeType.INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED
                             : resolvedNodeType;
 
-            utility =
-                    Objects.requireNonNull(
-                            utility,
-                            "utility must not be null"
-                    );
+            utility = Objects.requireNonNull(utility, "utility must not be null");
         }
 
         public boolean hasResolvedEntity() {
@@ -1148,37 +959,12 @@ public final class MissionAgent {
     ) implements EvidenceState {
 
         public CompanyGraphState {
-            evidenceRefs =
-                    evidenceRefs == null
-                            ? List.of()
-                            : List.copyOf(
-                            evidenceRefs
-                    );
+            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
+            summary = summary == null ? "" : summary;
+            attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
 
-            warnings =
-                    warnings == null
-                            ? List.of()
-                            : List.copyOf(
-                            warnings
-                    );
-
-            summary =
-                    summary == null
-                            ? ""
-                            : summary;
-
-            attributes =
-                    attributes == null
-                            ? Map.of()
-                            : Map.copyOf(
-                            attributes
-                    );
-
-            utility =
-                    Objects.requireNonNull(
-                            utility,
-                            "utility must not be null"
-                    );
+            utility = Objects.requireNonNull(utility, "utility must not be null");
         }
 
         public static CompanyGraphState skipped(
@@ -1190,71 +976,7 @@ public final class MissionAgent {
                     List.of(),
                     List.of(),
                     summary,
-                    Map.of(
-                            "skipped",
-                            true
-                    ),
-                    utility
-            );
-        }
-    }
-
-    public record LearningGraphState(
-            boolean performed,
-            List<EvidenceRef> evidenceRefs,
-            List<String> warnings,
-            String summary,
-            Map<String, Object> attributes,
-            UtilityAssessment utility
-    ) implements EvidenceState {
-
-        public LearningGraphState {
-            evidenceRefs =
-                    evidenceRefs == null
-                            ? List.of()
-                            : List.copyOf(
-                            evidenceRefs
-                    );
-
-            warnings =
-                    warnings == null
-                            ? List.of()
-                            : List.copyOf(
-                            warnings
-                    );
-
-            summary =
-                    summary == null
-                            ? ""
-                            : summary;
-
-            attributes =
-                    attributes == null
-                            ? Map.of()
-                            : Map.copyOf(
-                            attributes
-                    );
-
-            utility =
-                    Objects.requireNonNull(
-                            utility,
-                            "utility must not be null"
-                    );
-        }
-
-        public static LearningGraphState skipped(
-                String summary,
-                UtilityAssessment utility
-        ) {
-            return new LearningGraphState(
-                    false,
-                    List.of(),
-                    List.of(),
-                    summary,
-                    Map.of(
-                            "skipped",
-                            true
-                    ),
+                    Map.of("skipped", true),
                     utility
             );
         }
@@ -1276,85 +998,42 @@ public final class MissionAgent {
             String resolvedEntityId,
             String resolvedEntityType
     ) {
-        List<Map<String, Object>> evidence =
-                new ArrayList<>();
-
-        Set<String> executed =
-                new LinkedHashSet<>();
-
-        for (EvidenceState state :
-                context.objectsOfType(
-                        EvidenceState.class
-                )) {
+        List<Map<String, Object>> evidence = new ArrayList<>();
+        Set<String> executed = new LinkedHashSet<>();
+        for (EvidenceState state : context.objectsOfType(EvidenceState.class)) {
 
             evidence.add(
-                    utilityEvidence(
-                            actionName(
-                                    state
-                            ),
+                    utilityEvidence(actionName(state),
                             state.summary(),
                             state.attributes(),
                             state.evidenceRefs()
                     )
             );
-
-            executed.add(
-                    actionName(
-                            state
-                    )
-            );
+            executed.add(actionName(state));
         }
 
         /*
          * Current action has not yet been written to the blackboard.
          */
         evidence.add(
-                utilityEvidence(
-                        latestAction,
-                        latestSummary,
-                        latestAttributes,
-                        latestEvidenceRefs
-                )
-        );
+                utilityEvidence(latestAction, latestSummary, latestAttributes, latestEvidenceRefs));
 
-        executed.add(
-                latestAction
-        );
+        executed.add(latestAction);
 
         return utilityComponent.evaluate(
                 new UtilityRequest(
-                        input.request()
-                                .query(),
-
-                        input.intent()
-                                .selectedPath(),
-
+                        input.request().query(),
+                        input.intent().selectedPath(),
                         latestAction,
-
-                        List.copyOf(
-                                evidence
-                        ),
-
-                        nullToEmpty(
-                                resolvedEntityId
-                        ),
-
-                        nullToEmpty(
-                                resolvedEntityType
-                        ),
-
-                        Set.copyOf(
-                                executed
-                        ),
-
-                        input.intent()
-                                .allowedTools(),
-
-                        input.intent()
-                                .requiresCitations(),
-
-                        input.intent()
-                                .requiresVerification()
+                        List.copyOf(evidence),
+                        nullToEmpty(resolvedEntityId),
+                        nullToEmpty(resolvedEntityType),
+                        Set.copyOf(executed),
+                        input.intent().allowedTools(),
+                        input.intent().requiresDocumentEvidence(),
+                        input.intent().requiresInternalContext(),
+                        input.intent().requiresCitations(),
+                        input.intent().requiresVerification()
                 )
         );
     }
@@ -1365,55 +1044,21 @@ public final class MissionAgent {
             Map<String, Object> attributes,
             List<EvidenceRef> evidenceRefs
     ) {
-        Map<String, Object> state =
-                new LinkedHashMap<>();
+        Map<String, Object> state = new LinkedHashMap<>();
+        state.put("action", nullToEmpty(action));
+        state.put("summary", nullToEmpty(summary));
+        state.put("attributes", attributes == null ? Map.of() : attributes);
 
-        state.put(
-                "action",
-                nullToEmpty(
-                        action
-                )
+        List<EvidenceRef> refs = evidenceRefs == null ? List.of() : evidenceRefs;
+
+        state.put("evidenceCount", refs.size());
+
+        state.put("signals", refs.stream().limit(25)
+                .map(MissionAgent::evidenceSignal)
+                .toList()
         );
 
-        state.put(
-                "summary",
-                nullToEmpty(
-                        summary
-                )
-        );
-
-        state.put(
-                "attributes",
-                attributes == null
-                        ? Map.of()
-                        : attributes
-        );
-
-        List<EvidenceRef> refs =
-                evidenceRefs == null
-                        ? List.of()
-                        : evidenceRefs;
-
-        state.put(
-                "evidenceCount",
-                refs.size()
-        );
-
-        state.put(
-                "signals",
-                refs.stream()
-                        .limit(
-                                25
-                        )
-                        .map(
-                                MissionAgent::evidenceSignal
-                        )
-                        .toList()
-        );
-
-        return Map.copyOf(
-                state
-        );
+        return Map.copyOf(state);
     }
 
     private static Map<String, Object> evidenceSignal(
@@ -1423,60 +1068,16 @@ public final class MissionAgent {
             return Map.of();
         }
 
-        Map<String, Object> signal =
-                new LinkedHashMap<>();
+        Map<String, Object> signal = new LinkedHashMap<>();
+        signal.put("sourceType", ref.sourceType().name());
+        signal.put("sourceService", nullToEmpty(ref.sourceService()));
+        signal.put("objectId", nullToEmpty(ref.objectId()));
+        signal.put("parentObjectId", nullToEmpty(ref.parentObjectId()));
+        signal.put("locationLabel", nullToEmpty(ref.locationLabel()));
+        signal.put("section", nullToEmpty(ref.section()));
+        signal.put("attributes", ref.attributes() == null ? Map.of() : ref.attributes());
 
-        signal.put(
-                "sourceType",
-                ref.sourceType()
-                        .name()
-        );
-
-        signal.put(
-                "sourceService",
-                nullToEmpty(
-                        ref.sourceService()
-                )
-        );
-
-        signal.put(
-                "objectId",
-                nullToEmpty(
-                        ref.objectId()
-                )
-        );
-
-        signal.put(
-                "parentObjectId",
-                nullToEmpty(
-                        ref.parentObjectId()
-                )
-        );
-
-        signal.put(
-                "locationLabel",
-                nullToEmpty(
-                        ref.locationLabel()
-                )
-        );
-
-        signal.put(
-                "section",
-                nullToEmpty(
-                        ref.section()
-                )
-        );
-
-        signal.put(
-                "attributes",
-                ref.attributes() == null
-                        ? Map.of()
-                        : ref.attributes()
-        );
-
-        return Map.copyOf(
-                signal
-        );
+        return Map.copyOf(signal);
     }
 
     private static UtilityAssessment latestUtility(
@@ -1485,15 +1086,8 @@ public final class MissionAgent {
         if (blackboard == null) {
             return null;
         }
-
-        EvidenceState latest =
-                blackboard.last(
-                        EvidenceState.class
-                );
-
-        return latest == null
-                ? null
-                : latest.utility();
+        EvidenceState latest = blackboard.last(EvidenceState.class);
+        return latest == null ? null : latest.utility();
     }
 
     /*
@@ -1512,43 +1106,35 @@ public final class MissionAgent {
             MissionRunInput input,
             List<EvidenceState> evidenceStates
     ) {
-        MissionIntent intent =
-                input.intent();
-
+        MissionIntent intent = input.intent();
         DocumentEvidenceState documentState =
                 evidenceStates.stream()
-                        .filter(
-                                DocumentEvidenceState.class::isInstance
-                        )
-                        .map(
-                                DocumentEvidenceState.class::cast
-                        )
+                        .filter(DocumentEvidenceState.class::isInstance)
+                        .map(DocumentEvidenceState.class::cast)
                         .findFirst()
-                        .orElse(
-                                null
-                        );
+                        .orElse(null);
 
         InternalSearchState internalState =
                 evidenceStates.stream()
-                        .filter(
-                                InternalSearchState.class::isInstance
-                        )
-                        .map(
-                                InternalSearchState.class::cast
-                        )
+                        .filter(InternalSearchState.class::isInstance)
+                        .map(InternalSearchState.class::cast)
                         .findFirst()
-                        .orElse(
-                                null
-                        );
+                        .orElse(null);
 
-        List<String> missing =
-                new ArrayList<>();
+        CompanyGraphState companyGraphState =
+                evidenceStates.stream()
+                        .filter(CompanyGraphState.class::isInstance)
+                        .map(CompanyGraphState.class::cast)
+                        .findFirst()
+                        .orElse(null);
+
+        List<String> missing = new ArrayList<>();
 
         if (intent.requiresDocumentEvidence()
-                && documentState != null
-                && documentState
+                && (documentState == null
+                || documentState
                 .evidenceRefs()
-                .isEmpty()) {
+                .isEmpty())) {
 
             missing.add(
                     "document evidence"
@@ -1556,14 +1142,17 @@ public final class MissionAgent {
         }
 
         if (intent.requiresInternalContext()
-                && internalState != null
-                && internalState
-                .evidenceRefs()
-                .isEmpty()) {
+                && (internalState == null || internalState.evidenceRefs().isEmpty())) {
+            missing.add("internal context");
+        }
 
-            missing.add(
-                    "internal context"
-            );
+        if (intent.requiresCompanyGraph()) {
+            if (internalState == null || !internalState.hasResolvedEntity()) {
+                missing.add("an unambiguous internal entity");
+            } else if (companyGraphState == null
+                    || companyGraphState.evidenceRefs().isEmpty()) {
+                missing.add("company graph context");
+            }
         }
 
         if (missing.isEmpty()) {
@@ -1584,43 +1173,25 @@ public final class MissionAgent {
 
         List<String> warnings =
                 evidenceStates.stream()
-                        .flatMap(state ->
-                                state.warnings()
-                                        .stream()
-                        )
+                        .flatMap(state -> state.warnings().stream())
                         .distinct()
                         .toList();
 
         return new MissionResult(
                 input.missionId(),
-
                 "Insufficient grounded evidence",
-
                 answer,
-
                 List.of(),
-
                 List.of(),
-
                 List.of(),
-
                 List.of(),
-
                 List.of(),
-
                 List.of(),
-
                 Map.of(
-                        "grounded",
-                        false,
-
-                        "reason",
-                        "INSUFFICIENT_REQUIRED_EVIDENCE",
-
+                        "grounded", false,
+                        "reason", "INSUFFICIENT_REQUIRED_EVIDENCE",
                         "missing",
-                        List.copyOf(
-                                missing
-                        )
+                        List.copyOf(missing)
                 ),
 
                 Map.of(
@@ -1692,9 +1263,6 @@ public final class MissionAgent {
             return COMPANY_GRAPH;
         }
 
-        if (state instanceof LearningGraphState) {
-            return LEARNING_GRAPH;
-        }
 
         return state.getClass()
                 .getSimpleName();
@@ -1721,68 +1289,434 @@ public final class MissionAgent {
             MissionRunInput input,
             MissionIntent intent
     ) {
-        List<String> documentIds =
-                new ArrayList<>();
+        Set<String> documentIds = new LinkedHashSet<>();
+        Set<String> fileNames = new LinkedHashSet<>();
+        for (PreparedArtifact artifact : input.preparedArtifacts().preparedArtifacts()) {
 
-        List<String> fileNames =
-                new ArrayList<>();
+            String documentId = artifact.documentId();
+            if (documentId != null && !documentId.isBlank()) {
 
-        for (PreparedArtifact artifact :
-                input.preparedArtifacts()
-                        .preparedArtifacts()) {
-
-            if (artifact.documentId() != null
-                    && !artifact.documentId()
-                    .isBlank()) {
-
-                documentIds.add(
-                        artifact.documentId()
-                );
+                documentIds.add(documentId.trim());
             }
-
-            if (artifact.filename() != null
-                    && !artifact.filename()
-                    .isBlank()) {
-
-                fileNames.add(
-                        artifact.filename()
-                );
+            String fileName = artifact.filename();
+            if (fileName != null && !fileName.isBlank()) {
+                fileNames.add(fileName.trim());
             }
         }
 
         /*
-         * Existing indexed documents can be referenced by name in the
-         * frozen intent even when no document was uploaded with this request.
+         * Only explicit document requests may interpret targetEntities as
+         * document names/titles.
+         *
+         * A semantic SparrowX knowledge request such as
+         * "explain the agentic architecture" deliberately leaves the scope
+         * empty so docsvc can perform corpus-wide semantic retrieval.
          */
+        boolean explicitDocumentRequest =
+                Boolean.TRUE.equals(
+                        intent.attributes()
+                                .get(
+                                        "explicitDocumentRequest"
+                                )
+                );
+
         if (documentIds.isEmpty()
                 && fileNames.isEmpty()
-                && intent.requiresDocumentEvidence()) {
+                && intent.requiresDocumentEvidence()
+                && explicitDocumentRequest) {
 
-            intent.targetEntities()
-                    .stream()
-                    .filter(
-                            Objects::nonNull
-                    )
-                    .map(
-                            String::trim
-                    )
-                    .filter(value ->
-                            !value.isBlank()
-                    )
-                    .forEach(
-                            fileNames::add
+            for (String target :
+                    intent.targetEntities()) {
+
+                if (target != null
+                        && !target.isBlank()) {
+
+                    fileNames.add(
+                            target.trim()
                     );
+                }
+            }
         }
 
         return new DocumentScope(
-                documentIds.stream()
-                        .distinct()
-                        .toList(),
-
-                fileNames.stream()
-                        .distinct()
-                        .toList()
+                List.copyOf(documentIds),
+                List.copyOf(fileNames)
         );
+    }
+
+    private static List<EvidenceState> selectGroundingStates(
+            MissionIntent intent,
+            List<EvidenceState> evidenceStates
+    ) {
+        if (evidenceStates == null
+                || evidenceStates.isEmpty()) {
+
+            return List.of();
+        }
+
+        boolean internalOnly =
+                intent.requiresInternalContext()
+                        && !intent.requiresDocumentEvidence();
+
+        boolean documentOnly =
+                intent.requiresDocumentEvidence()
+                        && !intent.requiresInternalContext();
+
+        if (internalOnly) {
+            return evidenceStates.stream()
+                    .filter(state ->
+                            !(state instanceof DocumentEvidenceState)
+                    )
+                    .toList();
+        }
+
+        if (documentOnly) {
+            return evidenceStates.stream()
+                    .filter(DocumentEvidenceState.class::isInstance)
+                    .toList();
+        }
+
+        return List.copyOf(
+                evidenceStates
+        );
+    }
+
+    /**
+     * Selects the evidence that is authoritative for the frozen mission
+     * intent before citation labels are created or synthesis sees the data.
+     *
+     * Internal-only missions prefer the internal search root plus compact
+     * graph evidence. The graph EvidenceRef already carries its nodes and
+     * relationships, so citing every graph node would be redundant.
+     *
+     * Document-only missions keep the strongest document evidence, bounded
+     * to avoid flooding synthesis/citations with weak retrieval candidates.
+     * Mixed missions retain both source families.
+     */
+    private static List<EvidenceRef> selectGroundingEvidence(
+            MissionIntent intent,
+            List<EvidenceRef> rawEvidence
+    ) {
+        if (rawEvidence == null
+                || rawEvidence.isEmpty()) {
+
+            return List.of();
+        }
+
+        Map<String, EvidenceRef> unique =
+                new LinkedHashMap<>();
+
+        for (EvidenceRef ref : rawEvidence) {
+            if (ref == null
+                    || ref.evidenceId() == null
+                    || ref.evidenceId().isBlank()) {
+
+                continue;
+            }
+
+            unique.putIfAbsent(
+                    ref.evidenceId(),
+                    ref
+            );
+        }
+
+        List<EvidenceRef> deduplicated =
+                List.copyOf(
+                        unique.values()
+                );
+
+        boolean internalOnly =
+                intent.requiresInternalContext()
+                        && !intent.requiresDocumentEvidence();
+
+        boolean documentOnly =
+                intent.requiresDocumentEvidence()
+                        && !intent.requiresInternalContext();
+
+        if (internalOnly) {
+            return selectInternalGroundingEvidence(
+                    deduplicated
+            );
+        }
+
+        if (documentOnly) {
+            return selectDocumentGroundingEvidence(
+                    deduplicated
+            );
+        }
+
+        // Retain both source families for mixed missions within the existing
+        // eight-candidate budget. Internal graphs precede search candidates.
+        List<EvidenceRef> internal = selectInternalGroundingEvidence(deduplicated);
+        List<EvidenceRef> documents = selectDocumentGroundingEvidence(deduplicated);
+        Map<String, EvidenceRef> selected = new LinkedHashMap<>();
+        internal.stream().limit(4).forEach(ref -> selected.putIfAbsent(ref.evidenceId(), ref));
+        documents.stream().limit(4).forEach(ref -> selected.putIfAbsent(ref.evidenceId(), ref));
+        for (List<EvidenceRef> family : List.of(internal, documents, deduplicated)) {
+            for (EvidenceRef ref : family) {
+                if (selected.size() >= 8) {
+                    break;
+                }
+                selected.putIfAbsent(ref.evidenceId(), ref);
+            }
+        }
+        return List.copyOf(selected.values());
+    }
+
+    private static List<EvidenceRef> selectInternalGroundingEvidence(
+            List<EvidenceRef> evidence
+    ) {
+        Map<String, EvidenceRef> selected =
+                new LinkedHashMap<>();
+
+        // Keep relationship-bearing graph evidence before search candidates
+        // so a candidate cap cannot discard the graph behind broad matches.
+        for (EvidenceRef ref : evidence) {
+            if (isInternalGraphEvidence(ref)) {
+                selected.putIfAbsent(ref.evidenceId(), ref);
+            }
+        }
+
+        /*
+         * Keep the resolved search entity: search evidence includes score and
+         * matchReason, unlike graph-expanded entity nodes.
+         */
+        for (EvidenceRef ref : evidence) {
+            if (!isInternalEvidence(ref)) {
+                continue;
+            }
+
+            Map<String, Object> attributes =
+                    ref.attributes() == null
+                            ? Map.of()
+                            : ref.attributes();
+
+            if (attributes.containsKey("matchReason")
+                    || attributes.containsKey("score")) {
+
+                selected.putIfAbsent(
+                        ref.evidenceId(),
+                        ref
+                );
+            }
+        }
+
+        if (!selected.isEmpty()) {
+            return selected.values()
+                    .stream()
+                    .limit(8)
+                    .toList();
+        }
+
+        /*
+         * Search-only internal missions have no graph object. Keep a small,
+         * deterministic result set rather than every candidate.
+         */
+        return evidence.stream()
+                .filter(MissionAgent::isInternalEvidence)
+                .limit(8)
+                .toList();
+    }
+
+    private static List<EvidenceRef> selectDocumentGroundingEvidence(
+            List<EvidenceRef> evidence
+    ) {
+        return evidence.stream()
+                .filter(MissionAgent::isDocumentEvidence)
+                .sorted(
+                        (left, right) -> {
+                            int score =
+                                    Double.compare(
+                                            evidenceScore(right),
+                                            evidenceScore(left)
+                                    );
+
+                            if (score != 0) {
+                                return score;
+                            }
+
+                            return nullToEmpty(
+                                    left.evidenceId()
+                            ).compareTo(
+                                    nullToEmpty(
+                                            right.evidenceId()
+                                    )
+                            );
+                        }
+                )
+                .limit(8)
+                .toList();
+    }
+
+    private static boolean isInternalEvidence(
+            EvidenceRef ref
+    ) {
+        return ref != null
+                && "internal-service".equals(
+                nullToEmpty(
+                        ref.sourceService()
+                )
+        );
+    }
+
+    private static boolean isInternalGraphEvidence(
+            EvidenceRef ref
+    ) {
+        if (!isInternalEvidence(ref)) {
+            return false;
+        }
+
+        String sourceType =
+                ref.sourceType() == null
+                        ? ""
+                        : ref.sourceType().name();
+
+        return sourceType.contains("INTERNAL_GRAPH")
+                || nullToEmpty(
+                ref.evidenceId()
+        ).startsWith("internal-graph:");
+    }
+
+    private static boolean isDocumentEvidence(
+            EvidenceRef ref
+    ) {
+        if (ref == null) {
+            return false;
+        }
+
+        if ("document-service".equals(
+                nullToEmpty(
+                        ref.sourceService()
+                )
+        )) {
+            return true;
+        }
+
+        return ref.artifactId() != null
+                && !ref.artifactId().isBlank();
+    }
+
+    private static double evidenceScore(
+            EvidenceRef ref
+    ) {
+        if (ref == null
+                || ref.attributes() == null
+                || ref.attributes().isEmpty()) {
+
+            return 0.0d;
+        }
+
+        String[] keys = {
+                "relevanceScore",
+                "relevance_score",
+                "score",
+                "confidence"
+        };
+
+        for (String key : keys) {
+            Object value =
+                    ref.attributes()
+                            .get(key);
+
+            if (value instanceof Number number) {
+                return number.doubleValue();
+            }
+        }
+
+        return 0.0d;
+    }
+
+    /**
+     * Allows HYBRID to cross from internal evidence to docsvc only when the
+     * retrieved internal evidence explicitly points at a document. A high
+     * System-1 document utility by itself is not enough to violate frozen
+     * intent.
+     */
+    private static boolean hasDocumentDiscoverySignal(
+            Blackboard blackboard
+    ) {
+        if (blackboard == null) {
+            return false;
+        }
+
+        InternalSearchState search = blackboard.last(InternalSearchState.class);
+
+        if (search != null && hasDocumentDiscoverySignal(search.evidenceRefs())) {
+            return true;
+        }
+
+        CompanyGraphState company = blackboard.last(CompanyGraphState.class);
+
+        return company != null && hasDocumentDiscoverySignal(company.evidenceRefs());
+    }
+
+    private static boolean hasDocumentDiscoverySignal(
+            List<EvidenceRef> evidence
+    ) {
+        if (evidence == null
+                || evidence.isEmpty()) {
+
+            return false;
+        }
+
+        for (EvidenceRef ref : evidence) {
+            if (ref == null) {
+                continue;
+            }
+
+            Map<String, Object> attributes =
+                    ref.attributes() == null
+                            ? Map.of()
+                            : ref.attributes();
+
+            if (hasNonBlankAttribute(
+                    attributes,
+                    "document_external_ref",
+                    "documentExternalRef",
+                    "document_id",
+                    "documentId",
+                    "file_name",
+                    "fileName"
+            )) {
+                return true;
+            }
+
+            String uri =
+                    nullToEmpty(
+                            ref.sourceUri()
+                    ).toLowerCase(
+                            Locale.ROOT
+                    );
+
+            if (uri.endsWith(".pdf")
+                    || uri.endsWith(".md")
+                    || uri.endsWith(".txt")
+                    || uri.endsWith(".doc")
+                    || uri.endsWith(".docx")) {
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean hasNonBlankAttribute(
+            Map<String, Object> attributes,
+            String... keys
+    ) {
+        for (String key : keys) {
+            Object value =
+                    attributes.get(key);
+
+            if (value instanceof String text
+                    && !text.isBlank()) {
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Map<String, String> excerptsByEvidenceId(
