@@ -5,8 +5,6 @@ import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.internal.grpc.InternalServiceGrpc;
 import com.sparrowx.internal.grpc.ReadInternalCompanyGraphRequest;
 import com.sparrowx.internal.grpc.ReadInternalCompanyGraphResponse;
-import com.sparrowx.internal.grpc.ReadLearningGraphRequest;
-import com.sparrowx.internal.grpc.ReadLearningGraphResponse;
 import com.sparrowx.internal.grpc.SearchInternalEntitiesRequest;
 import com.sparrowx.internal.grpc.SearchInternalEntitiesResponse;
 import io.grpc.StatusRuntimeException;
@@ -60,18 +58,6 @@ public final class InternalGrpcClient {
                 stub -> stub.readInternalCompanyGraph(effectiveRequest));
     }
 
-    public ReadLearningGraphResponse readLearningGraph(
-            MissionContext context,
-            ReadLearningGraphRequest request) {
-        ReadLearningGraphRequest effectiveRequest = Objects.requireNonNull(request, "request must not be null")
-                .toBuilder()
-                .setContext(mapper.toRequestContext(context))
-                .build();
-        return invoke(
-                context,
-                Operation.READ_LEARNING_GRAPH,
-                stub -> stub.readLearningGraph(effectiveRequest));
-    }
 
     private <T> T invoke(
             MissionContext context,

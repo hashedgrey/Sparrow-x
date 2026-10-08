@@ -1,7 +1,6 @@
 package com.sparrowx.agentic.steps;
 
 import com.sparrowx.agentic.actions.internal.ReadInternalCompanyGraphAction;
-import com.sparrowx.agentic.actions.internal.ReadLearningGraphAction;
 import com.sparrowx.agentic.actions.internal.SearchInternalEntitiesAction;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.MissionContext;
@@ -31,13 +30,11 @@ public final class ResolveInternalContextStep {
 
     private final SearchInternalEntitiesAction searchAction;
     private final ReadInternalCompanyGraphAction companyGraphAction;
-    private final ReadLearningGraphAction learningGraphAction;
     private final DownstreamResponseValidator responseValidator;
 
     public ResolveInternalContextStep(
             SearchInternalEntitiesAction searchAction,
             ReadInternalCompanyGraphAction companyGraphAction,
-            ReadLearningGraphAction learningGraphAction,
             DownstreamResponseValidator responseValidator
     ) {
         this.searchAction = Objects.requireNonNull(
@@ -50,10 +47,6 @@ public final class ResolveInternalContextStep {
                 "companyGraphAction must not be null"
         );
 
-        this.learningGraphAction = Objects.requireNonNull(
-                learningGraphAction,
-                "learningGraphAction must not be null"
-        );
 
         this.responseValidator = Objects.requireNonNull(
                 responseValidator,
@@ -87,11 +80,6 @@ public final class ResolveInternalContextStep {
                             toGraphSpec(request.graphSpec())
                     );
 
-            case READ_LEARNING_GRAPH ->
-                    readLearningGraph(
-                            context,
-                            toGraphSpec(request.graphSpec())
-                    );
         };
     }
 
@@ -219,48 +207,6 @@ public final class ResolveInternalContextStep {
         );
     }
 
-    /**
-     * Direct capability used by the Hybrid planner after entity resolution.
-     */
-    public Result readLearningGraph(
-            MissionContext context,
-            GraphSpec spec
-    ) {
-        Objects.requireNonNull(context, "context must not be null");
-        Objects.requireNonNull(spec, "spec must not be null");
-
-        ReadLearningGraphAction.Result result =
-                learningGraphAction.execute(
-                        context,
-                        spec
-                );
-
-        responseValidator.validateInternal(
-                "read-learning-graph",
-                context.tenantId(),
-                result,
-                value -> new ResponseMetadata(
-                        context.tenantId(),
-                        spec.requestId(),
-                        spec.requestId()
-                                + ":learning-graph",
-                        value.evidenceRefs().size(),
-                        value.graph().getSerializedSize(),
-                        value.evidenceRefs()
-                )
-        );
-
-        return new Result(
-                Operation.READ_LEARNING_GRAPH,
-                result.evidenceRefs(),
-                "Loaded learning graph context",
-                List.of(),
-                Map.of(
-                        "serializedSizeBytes",
-                        result.graph().getSerializedSize()
-                )
-        );
-    }
 
     public record Result(
             Operation operation,
@@ -335,8 +281,7 @@ public final class ResolveInternalContextStep {
 
     public enum Operation {
         SEARCH_ENTITIES,
-        READ_COMPANY_GRAPH,
-        READ_LEARNING_GRAPH
+        READ_COMPANY_GRAPH
     }
 
     /*
@@ -367,9 +312,7 @@ public final class ResolveInternalContextStep {
                 );
             }
 
-            if ((operation == Operation.READ_COMPANY_GRAPH
-                    || operation == Operation.READ_LEARNING_GRAPH)
-                    && graphSpec == null) {
+            if (operation == Operation.READ_COMPANY_GRAPH && graphSpec == null) {
                 throw new IllegalArgumentException(
                         "graphSpec is required for graph operations"
                 );

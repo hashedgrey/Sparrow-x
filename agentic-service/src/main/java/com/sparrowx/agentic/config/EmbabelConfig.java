@@ -8,14 +8,11 @@ import com.sparrowx.agentic.actions.document.VerifyEvidenceGraphAction;
 import com.sparrowx.agentic.actions.governance.ApplyRedactionAction;
 import com.sparrowx.agentic.actions.governance.CheckGroundingAction;
 import com.sparrowx.agentic.actions.internal.ReadInternalCompanyGraphAction;
-import com.sparrowx.agentic.actions.internal.ReadLearningGraphAction;
 import com.sparrowx.agentic.actions.internal.SearchInternalEntitiesAction;
 import com.sparrowx.agentic.actions.synthesis.BuildCitationsAction;
 import com.sparrowx.agentic.adapters.document.DocumentClientMapper;
-import com.sparrowx.agentic.adapters.document.DocumentClientResiliencePolicy;
 import com.sparrowx.agentic.adapters.document.DocumentGrpcClient;
 import com.sparrowx.agentic.adapters.internal.InternalClientMapper;
-import com.sparrowx.agentic.adapters.internal.InternalClientResiliencePolicy;
 import com.sparrowx.agentic.adapters.internal.InternalGrpcClient;
 import com.sparrowx.agentic.agents.EmbabelMissionRunner;
 import com.sparrowx.agentic.agents.DefaultMissionEvidenceService;
@@ -68,7 +65,6 @@ import org.springframework.context.annotation.Import;
         VerifyEvidenceGraphAction.class,
         SearchInternalEntitiesAction.class,
         ReadInternalCompanyGraphAction.class,
-        ReadLearningGraphAction.class,
         ApplyRedactionAction.class,
         CheckGroundingAction.class,
         BuildCitationsAction.class,

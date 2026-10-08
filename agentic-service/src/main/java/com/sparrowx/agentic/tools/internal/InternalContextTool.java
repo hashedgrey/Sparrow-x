@@ -4,8 +4,6 @@ import com.sparrowx.agentic.adapters.internal.InternalGrpcClient;
 import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.internal.grpc.ReadInternalCompanyGraphRequest;
 import com.sparrowx.internal.grpc.ReadInternalCompanyGraphResponse;
-import com.sparrowx.internal.grpc.ReadLearningGraphRequest;
-import com.sparrowx.internal.grpc.ReadLearningGraphResponse;
 import com.sparrowx.internal.grpc.SearchInternalEntitiesRequest;
 import com.sparrowx.internal.grpc.SearchInternalEntitiesResponse;
 
@@ -35,10 +33,4 @@ public final class InternalContextTool {
         return client.readInternalCompanyGraph(context, request);
     }
 
-    public ReadLearningGraphResponse readLearningGraph(
-            MissionContext context,
-            ReadLearningGraphRequest request) {
-
-        return client.readLearningGraph(context, request);
-    }
 }

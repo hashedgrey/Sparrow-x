@@ -4,7 +4,6 @@ import com.sparrowx.agentic.adapters.internal.InternalClientMapper;
 import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.internal.grpc.InternalGraphNodeType;
 import com.sparrowx.internal.grpc.ReadInternalCompanyGraphRequest;
-import com.sparrowx.internal.grpc.ReadLearningGraphRequest;
 
 import java.util.Objects;
 
@@ -28,24 +27,6 @@ public final class InternalGraphRequestBuilder {
         Objects.requireNonNull(spec, "spec must not be null");
 
         return ReadInternalCompanyGraphRequest.newBuilder()
-                .setContext(clientMapper.toRequestContext(
-                        context,
-                        spec.requestId()))
-                .setRootEntityId(spec.rootEntityId())
-                .setRootNodeType(spec.rootNodeType())
-                .setDepth(spec.depth())
-                .setLimit(spec.limit())
-                .build();
-    }
-
-    public ReadLearningGraphRequest buildLearningGraph(
-            MissionContext context,
-            GraphSpec spec) {
-
-        Objects.requireNonNull(context, "context must not be null");
-        Objects.requireNonNull(spec, "spec must not be null");
-
-        return ReadLearningGraphRequest.newBuilder()
                 .setContext(clientMapper.toRequestContext(
                         context,
                         spec.requestId()))
