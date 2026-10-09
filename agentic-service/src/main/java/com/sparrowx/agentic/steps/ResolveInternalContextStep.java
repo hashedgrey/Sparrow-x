@@ -4,10 +4,13 @@ import com.sparrowx.agentic.actions.internal.ReadInternalCompanyGraphAction;
 import com.sparrowx.agentic.actions.internal.SearchInternalEntitiesAction;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.MissionContext;
+import com.sparrowx.agentic.planning.InternalRootSelection.Candidate;
 import com.sparrowx.agentic.tools.internal.InternalEntitySearchRequestBuilder.SearchSpec;
+import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder;
 import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder.GraphSpec;
 import com.sparrowx.agentic.validation.DownstreamResponseValidator;
 import com.sparrowx.agentic.validation.DownstreamResponseValidator.ResponseMetadata;
+import com.sparrowx.internal.grpc.InternalGraph;
 import com.sparrowx.internal.grpc.InternalGraphNodeType;
 import org.springframework.stereotype.Component;
 
@@ -113,54 +116,29 @@ public final class ResolveInternalContextStep {
                 )
         );
 
-        Map<String, Object> attributes = new LinkedHashMap<>();
+        // Return typed candidates; never collapse a result set into its first hit.
+        List<Candidate> candidates = result.candidates().stream()
+                .map(Candidate::fromProto)
+                .toList();
 
-        attributes.put(
-                "candidateCount",
-                result.candidates().size()
-        );
-
-        attributes.put(
-                "ambiguous",
-                result.ambiguous()
-        );
-
-        if (!result.ambiguous()
-                && !result.candidates().isEmpty()) {
-
-            var resolved = result.candidates().getFirst();
-
-            if (!resolved.getEntityId().isBlank()) {
-                attributes.put(
-                        "resolvedEntityId",
-                        resolved.getEntityId()
-                );
-
-                attributes.put(
-                        "resolvedNodeType",
-                        resolved.getNodeType().name()
-                );
-
-                attributes.put(
-                        "resolvedLabel",
-                        resolved.getLabel()
-                );
-
-                attributes.put(
-                        "resolvedScore",
-                        resolved.getScore()
-                );
-            }
-        }
+        // Current IntSvc search RPC exposes no pagination token. Treat hitting
+        // the requested limit as incomplete rather than claiming exhaustive results.
+        boolean exhaustive = candidates.size() < spec.limit();
+        List<String> warnings = new java.util.ArrayList<>(result.warnings());
+        if (!exhaustive) warnings.add(
+                "Root search may be truncated; increase the limit or implement pagination");
 
         return new Result(
                 Operation.SEARCH_ENTITIES,
                 result.evidenceRefs(),
-                "Resolved "
-                        + result.candidates().size()
-                        + " internal entity candidates",
-                result.warnings(),
-                Map.copyOf(attributes)
+                "Found " + candidates.size() + " candidate roots",
+                List.copyOf(warnings),
+                Map.of("candidateCount", candidates.size(),
+                        "backendAmbiguous", result.ambiguous(),
+                        "exhaustive", exhaustive),
+                candidates,
+                result.ambiguous(),
+                exhaustive
         );
     }
 
@@ -200,82 +178,145 @@ public final class ResolveInternalContextStep {
                 result.evidenceRefs(),
                 "Loaded internal company graph context",
                 List.of(),
-                Map.of(
-                        "serializedSizeBytes",
-                        result.graph().getSerializedSize()
-                )
+                Map.of("serializedSizeBytes", result.graph().getSerializedSize()),
+                List.of(),
+                false,
+                true
         );
     }
 
+    public ReadInternalCompanyGraphAction.ExpansionResult expandCompanyGraph(
+            MissionContext context,
+            InternalGraphRequestBuilder.ExpansionSpec spec
+    ) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(spec, "spec must not be null");
+
+        ReadInternalCompanyGraphAction.ExpansionResult result =
+                companyGraphAction.expand(context, spec);
+
+        responseValidator.validateInternal(
+                "expand-internal-company-graph",
+                context.tenantId(),
+                result,
+                value -> new ResponseMetadata(
+                        context.tenantId(),
+                        spec.requestId(),
+                        spec.requestId() + ":company-graph-expansion",
+                        value.evidenceRefs().size(),
+                        value.graph().getSerializedSize(),
+                        value.evidenceRefs()
+                )
+        );
+
+        return result;
+    }
+
+    public ReadInternalCompanyGraphAction.Result mapMergedCompanyGraph(
+            MissionContext context,
+            String requestId,
+            InternalGraph graph
+    ) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(graph, "graph must not be null");
+
+        if (requestId == null || requestId.isBlank()) {
+            throw new IllegalArgumentException(
+                    "requestId must not be blank"
+            );
+        }
+
+        ReadInternalCompanyGraphAction.Result result =
+                companyGraphAction.mapGraph(graph);
+
+        responseValidator.validateInternal(
+                "merged-internal-company-graph",
+                context.tenantId(),
+                result,
+                value -> new ResponseMetadata(
+                        context.tenantId(),
+                        requestId,
+                        requestId + ":merged-company-graph",
+                        value.evidenceRefs().size(),
+                        value.graph().getSerializedSize(),
+                        value.evidenceRefs()
+                )
+        );
+
+        return result;
+    }
+
+    public ReadInternalCompanyGraphAction.Result readCompanyGraphRoot(
+            MissionContext context,
+            String requestId,
+            String rootEntityId,
+            InternalGraphNodeType rootNodeType
+    ) {
+        Objects.requireNonNull(context, "context must not be null");
+
+        GraphSpec spec = new GraphSpec(
+                requestId,
+                rootEntityId,
+                rootNodeType,
+                0,
+                1
+        );
+
+        ReadInternalCompanyGraphAction.Result result =
+                companyGraphAction.execute(context, spec);
+
+        responseValidator.validateInternal(
+                "read-company-graph-root",
+                context.tenantId(),
+                result,
+                value -> new ResponseMetadata(
+                        context.tenantId(),
+                        requestId,
+                        requestId + ":root",
+                        value.evidenceRefs().size(),
+                        value.graph().getSerializedSize(),
+                        value.evidenceRefs()
+                )
+        );
+
+        if (result.graph().getNodesCount() != 1
+                || result.graph().getRelationshipsCount() != 0) {
+            throw new IllegalStateException(
+                    "Root-only graph read returned additional graph content"
+            );
+        }
+
+        var root = result.graph().getNodes(0);
+
+        if (!root.getEntityId().equals(rootEntityId)
+                || root.getNodeType() != rootNodeType) {
+            throw new IllegalStateException(
+                    "Root-only graph read returned a different entity"
+            );
+        }
+
+        return result;
+    }
 
     public record Result(
             Operation operation,
             List<EvidenceRef> evidenceRefs,
             String summary,
             List<String> warnings,
-            Map<String, Object> attributes
+            Map<String, Object> attributes,
+            List<Candidate> candidates,
+            boolean backendAmbiguous,
+            boolean exhaustive
     ) {
         public Result {
-            operation = Objects.requireNonNull(
-                    operation,
-                    "operation must not be null"
-            );
-
-            evidenceRefs = evidenceRefs == null
-                    ? List.of()
-                    : List.copyOf(evidenceRefs);
-
-            summary = summary == null
-                    ? ""
-                    : summary;
-
-            warnings = warnings == null
-                    ? List.of()
-                    : List.copyOf(warnings);
-
-            attributes = attributes == null
-                    ? Map.of()
-                    : Map.copyOf(attributes);
-        }
-
-        public boolean hasResolvedEntity() {
-            Object entityId =
-                    attributes.get("resolvedEntityId");
-
-            Object nodeType =
-                    attributes.get("resolvedNodeType");
-
-            return entityId instanceof String id
-                    && !id.isBlank()
-                    && nodeType instanceof String type
-                    && !type.isBlank();
-        }
-
-        public String resolvedEntityId() {
-            Object value =
-                    attributes.get("resolvedEntityId");
-
-            return value instanceof String text
-                    ? text
-                    : "";
-        }
-
-        public InternalGraphNodeType resolvedNodeType() {
-            Object value =
-                    attributes.get("resolvedNodeType");
-
-            if (!(value instanceof String text)
-                    || text.isBlank()) {
-                return InternalGraphNodeType
-                        .INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED;
-            }
-
-            try {
-                return InternalGraphNodeType.valueOf(text);
-            } catch (IllegalArgumentException ignored) {
-                return InternalGraphNodeType
-                        .INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED;
-            }
+            operation = Objects.requireNonNull(operation, "operation");
+            evidenceRefs = List.copyOf(Objects.requireNonNull(evidenceRefs, "evidenceRefs"));
+            summary = Objects.requireNonNull(summary, "summary");
+            warnings = List.copyOf(Objects.requireNonNull(warnings, "warnings"));
+            attributes = Map.copyOf(Objects.requireNonNull(attributes, "attributes"));
+            candidates = List.copyOf(Objects.requireNonNull(candidates, "candidates"));
+            if (operation != Operation.SEARCH_ENTITIES && !candidates.isEmpty())
+                throw new IllegalArgumentException("Only entity-search results may carry root candidates");
         }
     }
 
