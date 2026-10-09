@@ -36,7 +36,13 @@ public final class GetInternalGraphContextQueryHandler
     }
 
     private static int normalizeDepth(int depth) {
-        return depth <= 0 ? 1 : Math.min(depth, 8);
+        if (depth < 0 || depth > 8) {
+            throw new IllegalArgumentException(
+                    "depth must be between 0 and 8"
+            );
+        }
+
+        return depth;
     }
 
     private static int normalizeLimit(int limit) {
