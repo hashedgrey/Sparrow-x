@@ -329,53 +329,7 @@ public class InternalServiceGrpcImpl extends InternalServiceGrpc.InternalService
 
 
 
-    @Override
-    public void createPermission(
-            CreatePermissionRequest request,
-            StreamObserver<CreatePermissionResponse> responseObserver
-    ) {
-        try {
-            var command = PermissionMapper.toCreatePermissionCommand(request);
-            var result = commandBus.dispatch(command);
 
-            responseObserver.onNext(
-                    PermissionMapper.toCreatePermissionResponse(result)
-            );
-            responseObserver.onCompleted();
-
-        } catch (InternalServiceException ex) {
-            log.error("CreatePermission failed with InternalServiceException", ex);
-            throw ex;
-
-        } catch (Exception ex) {
-            log.error("CreatePermission failed", ex);
-            throw new InternalServiceException("Failed to create permission", ex);
-        }
-    }
-
-    @Override
-    public void getPermission(
-            GetPermissionRequest request,
-            StreamObserver<GetPermissionResponse> responseObserver
-    ) {
-        try {
-            var query = PermissionMapper.toGetPermissionQuery(request);
-            var result = queryBus.dispatch(query);
-
-            responseObserver.onNext(
-                    PermissionMapper.toGetPermissionResponse(result)
-            );
-            responseObserver.onCompleted();
-
-        } catch (InternalServiceException ex) {
-            log.error("GetPermission failed with InternalServiceException", ex);
-            throw ex;
-
-        } catch (Exception ex) {
-            log.error("GetPermission failed", ex);
-            throw new InternalServiceException("Failed to get permission", ex);
-        }
-    }
 
     @Override
     public void searchInternalEntities(
@@ -432,6 +386,73 @@ public class InternalServiceGrpcImpl extends InternalServiceGrpc.InternalService
         } catch (Exception ex) {
             log.error("ReadInternalCompanyGraph failed", ex);
             throw new InternalServiceException("Failed to read internal company graph", ex);
+        }
+    }
+
+    @Override
+    public void expandInternalCompanyGraph(
+            ExpandInternalCompanyGraphRequest request,
+            StreamObserver<ExpandInternalCompanyGraphResponse> responseObserver
+    ) {
+        try {
+            var query = InternalGraphExpansionMapper.toQuery(request);
+
+            var result = queryBus.dispatch(query);
+
+            responseObserver.onNext(
+                    InternalGraphExpansionMapper.toResponse(result)
+            );
+
+            responseObserver.onCompleted();
+
+        } catch (InternalServiceException exception) {
+            log.error(
+                    "ExpandInternalCompanyGraph failed with InternalServiceException",
+                    exception
+            );
+
+            throw exception;
+
+        } catch (Exception exception) {
+            log.error(
+                    "ExpandInternalCompanyGraph failed",
+                    exception
+            );
+
+            throw new InternalServiceException(
+                    "Failed to expand company graph",
+                    exception
+            );
+        }
+    }
+
+    @Override
+    public void describeInternalCompanyGraph(
+            DescribeInternalCompanyGraphRequest request,
+            StreamObserver<DescribeInternalCompanyGraphResponse> responseObserver
+    ) {
+        try {
+            var query = InternalGraphOntologyMapper.toQuery(request);
+            var result = queryBus.dispatch(query);
+
+            responseObserver.onNext(
+                    InternalGraphOntologyMapper.toResponse(result)
+            );
+            responseObserver.onCompleted();
+
+        } catch (InternalServiceException exception) {
+            log.error(
+                    "DescribeInternalCompanyGraph failed with InternalServiceException",
+                    exception
+            );
+            throw exception;
+
+        } catch (Exception exception) {
+            log.error("DescribeInternalCompanyGraph failed", exception);
+            throw new InternalServiceException(
+                    "Failed to describe internal company graph",
+                    exception
+            );
         }
     }
 

@@ -45,7 +45,6 @@ public class SearchInternalEntitiesQueryHandler
     private final InternalDocumentJpaRepository documentRepository;
     private final RunbookJpaRepository runbookRepository;
     private final EngineerJpaRepository engineerRepository;
-    private final PermissionJpaRepository permissionRepository;
     private final SearchInternalEntitiesQueryValidator validator;
     private final EngineerTeamMembershipJpaRepository membershipRepository;
     public SearchInternalEntitiesQueryHandler(
@@ -55,7 +54,6 @@ public class SearchInternalEntitiesQueryHandler
             InternalDocumentJpaRepository documentRepository,
             RunbookJpaRepository runbookRepository,
             EngineerJpaRepository engineerRepository,
-            PermissionJpaRepository permissionRepository,
             EngineerTeamMembershipJpaRepository membershipRepository,
             SearchInternalEntitiesQueryValidator validator
     ) {
@@ -65,7 +63,6 @@ public class SearchInternalEntitiesQueryHandler
         this.documentRepository = documentRepository;
         this.runbookRepository = runbookRepository;
         this.engineerRepository = engineerRepository;
-        this.permissionRepository = permissionRepository;
         this.membershipRepository = membershipRepository;
         this.validator = validator;
     }
@@ -192,13 +189,7 @@ public class SearchInternalEntitiesQueryHandler
             }
         }
 
-        if (shouldSearch(allowedTypes, TYPE_PERMISSION)) {
-            permissionRepository
-                    .searchByTenantIdAndText(query.tenantId(), searchText)
-                    .forEach(permission ->
-                            results.add(toResult(permission, searchText))
-                    );
-        }
+
 
         var ranked = results.stream()
                 .filter(result -> matchesRootScope(query, result))
@@ -397,23 +388,7 @@ public class SearchInternalEntitiesQueryHandler
         );
     }
 
-    private InternalEntitySearchResult toResult(
-            PermissionEntity permission,
-            String query
-    ) {
-        return new InternalEntitySearchResult(
-                permission.getPermissionId(),
-                TYPE_PERMISSION,
-                permission.getName(),
-                "",
-                permission.getDescription(),
-                score(query, permission.getName(), "", permission.getDescription()),
-                matchReason(query, permission.getName(), "", permission.getDescription()),
-                "",
-                "",
-                Map.of()
-        );
-    }
+
 
     private boolean shouldSearch(
             Set<String> allowedTypes,
