@@ -23,6 +23,16 @@ spring:
     show-sql: false
 
 
+  graph:
+      max-hops: 8
+      max-steps: 16
+      max-nodes: 150
+      max-edges: 300
+      max-expansions: 32
+      max-bindings: 500
+      max-traversal-millis: 30000
+
+
 server:
   port: ${SERVER_PORT:8086}
 
