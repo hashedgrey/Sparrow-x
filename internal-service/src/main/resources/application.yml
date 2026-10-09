@@ -36,6 +36,12 @@ spring:
       ssl:
         enabled: false
 
+
+  graph:
+    expansion:
+      max-frontier-nodes: 500
+      max-edges: 5000
+
 server:
   port: 8084
 
