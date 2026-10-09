@@ -6,10 +6,7 @@ import com.sparrowx.agentic.tools.internal.InternalContextMapper;
 import com.sparrowx.agentic.tools.internal.InternalContextTool;
 import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder;
 import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder.GraphSpec;
-import com.sparrowx.internal.grpc.InternalGraph;
-import com.sparrowx.internal.grpc.InternalGraphNodeType;
-import com.sparrowx.internal.grpc.ReadInternalCompanyGraphRequest;
-import com.sparrowx.internal.grpc.ReadInternalCompanyGraphResponse;
+import com.sparrowx.internal.grpc.*;
 
 import java.util.List;
 import java.util.Objects;
@@ -108,6 +105,73 @@ public final class ReadInternalCompanyGraphAction {
                 contextMapper.fromCompanyGraph(response)
         );
 
+    }
+
+    public ExpansionResult expand(
+            MissionContext context,
+            InternalGraphRequestBuilder.ExpansionSpec spec
+    ) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(spec, "spec must not be null");
+
+        ExpandInternalCompanyGraphRequest request =
+                requestBuilder.buildGraphExpansion(context, spec);
+
+        ExpandInternalCompanyGraphResponse response =
+                contextTool.expandCompanyGraph(context, request);
+
+        if (!response.hasGraph()) {
+            throw new IllegalStateException(
+                    "Internal Service returned no graph for expansion"
+            );
+        }
+
+        Result mapped = mapGraph(response.getGraph());
+
+        return new ExpansionResult(
+                mapped.graph(),
+                mapped.evidenceRefs(),
+                response.getTruncated()
+        );
+    }
+
+    /*
+     * Use this after the traversal controller merges all graph slices.
+     * Mapping the merged graph regenerates display facts across the
+     * complete collected evidence.
+     */
+    public Result mapGraph(InternalGraph graph) {
+        Objects.requireNonNull(graph, "graph must not be null");
+
+        ReadInternalCompanyGraphResponse envelope =
+                ReadInternalCompanyGraphResponse.newBuilder()
+                        .setGraph(graph)
+                        .build();
+
+        return new Result(
+                graph,
+                contextMapper.fromCompanyGraph(envelope)
+        );
+    }
+
+    public record ExpansionResult(
+            InternalGraph graph,
+            List<EvidenceRef> evidenceRefs,
+            boolean truncated
+    ) {
+        public ExpansionResult {
+            graph = Objects.requireNonNull(
+                    graph,
+                    "graph must not be null"
+            );
+
+            evidenceRefs = List.copyOf(
+                    Objects.requireNonNull(
+                            evidenceRefs,
+                            "evidenceRefs must not be null"
+                    )
+            );
+        }
     }
 
     public record Result(

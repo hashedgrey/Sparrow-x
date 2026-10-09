@@ -2,10 +2,7 @@ package com.sparrowx.agentic.tools.internal;
 
 import com.sparrowx.agentic.adapters.internal.InternalGrpcClient;
 import com.sparrowx.agentic.mission.model.MissionContext;
-import com.sparrowx.internal.grpc.ReadInternalCompanyGraphRequest;
-import com.sparrowx.internal.grpc.ReadInternalCompanyGraphResponse;
-import com.sparrowx.internal.grpc.SearchInternalEntitiesRequest;
-import com.sparrowx.internal.grpc.SearchInternalEntitiesResponse;
+import com.sparrowx.internal.grpc.*;
 
 import java.util.Objects;
 
@@ -32,5 +29,20 @@ public final class InternalContextTool {
 
         return client.readInternalCompanyGraph(context, request);
     }
+
+    public ExpandInternalCompanyGraphResponse expandCompanyGraph(
+            MissionContext context,
+            ExpandInternalCompanyGraphRequest request
+    ) {
+        return client.expandInternalCompanyGraph(context, request);
+    }
+
+    public DescribeInternalCompanyGraphResponse describeCompanyGraph(
+            MissionContext context,
+            DescribeInternalCompanyGraphRequest request
+    ) {
+        return client.describeInternalCompanyGraph(context, request);
+    }
+
 
 }

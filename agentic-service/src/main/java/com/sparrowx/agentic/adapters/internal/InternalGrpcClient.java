@@ -2,11 +2,7 @@ package com.sparrowx.agentic.adapters.internal;
 
 import com.sparrowx.agentic.adapters.internal.InternalClientResiliencePolicy.Operation;
 import com.sparrowx.agentic.mission.model.MissionContext;
-import com.sparrowx.internal.grpc.InternalServiceGrpc;
-import com.sparrowx.internal.grpc.ReadInternalCompanyGraphRequest;
-import com.sparrowx.internal.grpc.ReadInternalCompanyGraphResponse;
-import com.sparrowx.internal.grpc.SearchInternalEntitiesRequest;
-import com.sparrowx.internal.grpc.SearchInternalEntitiesResponse;
+import com.sparrowx.internal.grpc.*;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.MetadataUtils;
 
@@ -59,6 +55,38 @@ public final class InternalGrpcClient {
     }
 
 
+    public ExpandInternalCompanyGraphResponse expandInternalCompanyGraph(
+            MissionContext context,
+            ExpandInternalCompanyGraphRequest request
+    ) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+
+        String requestId = request.getContext().getRequestId();
+
+        if (requestId.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Expansion requestId must not be blank"
+            );
+        }
+
+        /*
+         * Tenant and actor come from the trusted mission context.
+         * Preserve the individual expansion round's request ID.
+         */
+        ExpandInternalCompanyGraphRequest effectiveRequest =
+                request.toBuilder()
+                        .setContext(
+                                mapper.toRequestContext(context, requestId)
+                        )
+                        .build();
+
+        return invoke(
+                context,
+                Operation.EXPAND_INTERNAL_COMPANY_GRAPH,
+                stub -> stub.expandInternalCompanyGraph(effectiveRequest)
+        );
+    }
     private <T> T invoke(
             MissionContext context,
             Operation operation,
@@ -74,4 +102,28 @@ public final class InternalGrpcClient {
             throw resiliencePolicy.translate(operation, exception);
         }
     }
+
+    public DescribeInternalCompanyGraphResponse describeInternalCompanyGraph(
+            MissionContext context,
+            DescribeInternalCompanyGraphRequest request
+    ) {
+        Objects.requireNonNull(context, "context must not be null");
+        Objects.requireNonNull(request, "request must not be null");
+
+        String requestId = request.getContext().getRequestId();
+
+        DescribeInternalCompanyGraphRequest effectiveRequest =
+                request.toBuilder()
+                        .setContext(requestId.isBlank()
+                                ? mapper.toRequestContext(context)
+                                : mapper.toRequestContext(context, requestId))
+                        .build();
+
+        return invoke(
+                context,
+                Operation.DESCRIBE_INTERNAL_COMPANY_GRAPH,
+                stub -> stub.describeInternalCompanyGraph(effectiveRequest)
+        );
+    }
+
 }

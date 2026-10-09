@@ -17,17 +17,29 @@ public final class InternalClientResiliencePolicy {
 
         EnumMap<Operation, Duration> configured = new EnumMap<>(Operation.class);
         for (Operation operation : Operation.values()) {
+            Duration candidate = deadlines.get(operation);
+
+            // Preserve existing configuration, with an optional explicit override.
+            if (operation == Operation.DESCRIBE_INTERNAL_COMPANY_GRAPH
+                    && !deadlines.containsKey(operation)) {
+                candidate = deadlines.get(Operation.READ_INTERNAL_COMPANY_GRAPH);
+            }
+
             Duration deadline = Objects.requireNonNull(
-                    deadlines.get(operation),
-                    () -> "missing deadline for " + operation);
-            if (deadline.isZero() || deadline.isNegative() || deadline.toMillis() == 0) {
-                throw new IllegalArgumentException("deadline must be at least one millisecond for " + operation);
+                    candidate,
+                    () -> "missing deadline for " + operation
+            );
+
+            if (deadline.isZero() || deadline.isNegative()
+                    || deadline.toMillis() == 0) {
+                throw new IllegalArgumentException(
+                        "deadline must be at least one millisecond for " + operation
+                );
             }
             configured.put(operation, deadline);
         }
         this.deadlines = Map.copyOf(configured);
     }
-
     public Duration deadlineFor(Operation operation) {
         return deadlines.get(Objects.requireNonNull(operation, "operation must not be null"));
     }
@@ -60,7 +72,8 @@ public final class InternalClientResiliencePolicy {
     public enum Operation {
         SEARCH_INTERNAL_ENTITIES,
         READ_INTERNAL_COMPANY_GRAPH,
-        READ_LEARNING_GRAPH
+        EXPAND_INTERNAL_COMPANY_GRAPH,
+        DESCRIBE_INTERNAL_COMPANY_GRAPH
     }
 
     public enum FailureKind {

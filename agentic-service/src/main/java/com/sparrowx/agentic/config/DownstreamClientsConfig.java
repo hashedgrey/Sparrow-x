@@ -25,15 +25,29 @@ import java.util.Map;
 public final class DownstreamClientsConfig {
 
     @Bean
-    public InternalClientResiliencePolicy internalClientResiliencePolicy() {
+    public InternalClientResiliencePolicy internalClientResiliencePolicy(
+            @Value("${sparrowx.internal.deadlines.search:3s}")
+            Duration searchDeadline,
+
+            @Value("${sparrowx.internal.deadlines.company-graph:5s}")
+            Duration companyGraphDeadline,
+
+            @Value("${sparrowx.internal.deadlines.graph-expansion:5s}")
+            Duration expansionDeadline
+    ) {
         return new InternalClientResiliencePolicy(
                 Map.of(
-                        InternalClientResiliencePolicy.Operation.SEARCH_INTERNAL_ENTITIES,
-                        Duration.ofSeconds(3),
-                        InternalClientResiliencePolicy.Operation.READ_INTERNAL_COMPANY_GRAPH,
-                        Duration.ofSeconds(5),
-                        InternalClientResiliencePolicy.Operation.READ_LEARNING_GRAPH,
-                        Duration.ofSeconds(5)
+                        InternalClientResiliencePolicy.Operation
+                                .SEARCH_INTERNAL_ENTITIES,
+                        searchDeadline,
+
+                        InternalClientResiliencePolicy.Operation
+                                .READ_INTERNAL_COMPANY_GRAPH,
+                        companyGraphDeadline,
+
+                        InternalClientResiliencePolicy.Operation
+                                .EXPAND_INTERNAL_COMPANY_GRAPH,
+                        expansionDeadline
                 )
         );
     }
