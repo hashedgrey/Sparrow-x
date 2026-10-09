@@ -1,6 +1,5 @@
 package com.sparrowx.internal.data.postgres.mappers;
 
-import com.sparrowx.internal.data.postgres.entities.PermissionEntity;
 import com.sparrowx.internal.models.Permission;
 import com.sparrowx.internal.valueobjects.CreatedAt;
 import com.sparrowx.internal.valueobjects.PermissionId;
