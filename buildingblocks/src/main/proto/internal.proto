@@ -111,7 +111,40 @@ service InternalService {
   rpc ReadInternalCompanyGraph(ReadInternalCompanyGraphRequest)
       returns (ReadInternalCompanyGraphResponse);
 
+  rpc ExpandInternalCompanyGraph(
+      ExpandInternalCompanyGraphRequest
+      ) returns (
+      ExpandInternalCompanyGraphResponse
+      );
 
+  rpc DescribeInternalCompanyGraph(
+      DescribeInternalCompanyGraphRequest
+      ) returns (
+      DescribeInternalCompanyGraphResponse
+      );
+
+
+}
+
+message DescribeInternalCompanyGraphRequest {
+  RequestContext context = 1;
+}
+
+message DescribeInternalCompanyGraphResponse {
+  string ontology_json = 1;
+  string schema_version = 2;
+}
+
+message ExpandInternalCompanyGraphRequest {
+  RequestContext context = 1;
+  repeated string frontier_node_ids = 2;
+  repeated string relationship_types = 3;
+  int32 limit = 4;
+}
+
+message ExpandInternalCompanyGraphResponse {
+  InternalGraph graph = 1;
+  bool truncated = 2;
 }
 
 // ========================
