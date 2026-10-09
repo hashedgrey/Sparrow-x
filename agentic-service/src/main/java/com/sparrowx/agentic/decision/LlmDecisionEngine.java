@@ -60,7 +60,7 @@ public final class LlmDecisionEngine {
                                 request.operationId(),
                                 request.idempotencyKey(),
                                 SYSTEM_PROMPT,
-                                userPrompt(request),
+                                userPrompt,
                                 request.outputSchema(),
                                 request.maxOutputTokens(),
                                 request.temperature(),
@@ -72,27 +72,6 @@ public final class LlmDecisionEngine {
                 response.provider() + "/" + response.model(),
                 response
         );
-    }
-
-    private String userPrompt(
-            Request request
-    ) {
-        Objects.requireNonNull(
-                request,
-                "request must not be null"
-        );
-
-        try {
-            return objectMapper.writeValueAsString(
-                    Map.of(
-                            "task", "Resolve only the requested semantic fields.",
-                            "state", request.state(),
-                            "fieldsToResolve", request.fieldsToResolve()
-                    )
-            );
-        } catch (Exception exception) {
-            throw new IllegalStateException("Unable to serialize LLM decision request", exception);
-        }
     }
 
     private String serializePrompt(

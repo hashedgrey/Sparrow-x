@@ -21,16 +21,20 @@ import com.sparrowx.agentic.mission.artifact.PreparedArtifact;
 import com.sparrowx.agentic.mission.evidence.Citation;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.MissionResult;
+import com.sparrowx.agentic.planning.GraphTraversal;
 import com.sparrowx.agentic.planning.MissionIntent;
+import com.sparrowx.agentic.planning.InternalRootSelection;
+import com.sparrowx.agentic.planning.InternalRootSelection.*;
+import org.springframework.beans.factory.annotation.Value;
 import com.sparrowx.agentic.steps.BuildDocumentEvidenceStep;
+import com.sparrowx.agentic.steps.GoalDirectedCompanyGraphStep;
 import com.sparrowx.agentic.steps.ResolveInternalContextStep;
 import com.sparrowx.agentic.tools.document.DocumentEvidenceRequestBuilder.BuildSpec;
 import com.sparrowx.agentic.tools.document.DocumentSpanSearchRequestBuilder.Scope;
-import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder.GraphSpec;
+import com.sparrowx.agentic.planning.GraphTraversal.Status;
 import com.sparrowx.document.proto.DocumentEvidenceGraphProto;
 import com.sparrowx.document.proto.EvidenceGoalProto;
 import com.sparrowx.document.proto.RetrievalModeProto;
-import com.sparrowx.internal.grpc.InternalGraphNodeType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -75,19 +79,25 @@ public final class MissionAgent {
     private final SystemOneUtilityComponent utilityComponent;
     private final BuildDocumentEvidenceStep documentStep;
     private final ResolveInternalContextStep internalStep;
+    private final GoalDirectedCompanyGraphStep graphTraversalStep;
     private final BuildCitationsAction citationsAction;
     private final SynthesisComponent synthesisComponent;
     private final MissionEventPublisher eventPublisher;
     private final InternalSearchSpecResolver internalSearchSpecResolver;
+    private final int maxGraphRoots;
+    private final long maxGraphBatchMillis;
 
     public MissionAgent(
             SystemOneUtilityComponent utilityComponent,
             BuildDocumentEvidenceStep documentStep,
             ResolveInternalContextStep internalStep,
+            GoalDirectedCompanyGraphStep graphTraversalStep,
             InternalSearchSpecResolver internalSearchSpecResolver,
             BuildCitationsAction citationsAction,
             SynthesisComponent synthesisComponent,
-            MissionEventPublisher eventPublisher
+            MissionEventPublisher eventPublisher,
+            @Value("${sparrowx.graph.max-graph-roots:32}") int maxGraphRoots,
+            @Value("${sparrowx.graph.max-graph-batch-millis:120000}") long maxGraphBatchMillis
     ) {
         this.utilityComponent =
                 Objects.requireNonNull(utilityComponent, "utilityComponent must not be null");
@@ -97,9 +107,18 @@ public final class MissionAgent {
         this.internalSearchSpecResolver =
                 Objects.requireNonNull(internalSearchSpecResolver, "internalSearchSpecResolver must not be null");
 
+        this.graphTraversalStep = Objects.requireNonNull(
+                graphTraversalStep,
+                "graphTraversalStep must not be null"
+        );
         this.citationsAction = Objects.requireNonNull(citationsAction, "citationsAction must not be null");
         this.synthesisComponent = Objects.requireNonNull(synthesisComponent, "synthesisComponent must not be null");
         this.eventPublisher = Objects.requireNonNull(eventPublisher, "eventPublisher must not be null");
+        if (maxGraphRoots < 1 || maxGraphBatchMillis < 1) {
+            throw new IllegalArgumentException("Graph root/batch budgets must be positive");
+        }
+        this.maxGraphRoots = maxGraphRoots;
+        this.maxGraphBatchMillis = maxGraphBatchMillis;
     }
 
     /*
@@ -333,80 +352,74 @@ public final class MissionAgent {
             MissionRunInput input,
             OperationContext context
     ) {
-        Objects.requireNonNull(
-                input,
-                "input must not be null"
+        Objects.requireNonNull(input, "input");
+        Objects.requireNonNull(context, "context");
+
+        var extraction = internalSearchSpecResolver.resolve(
+                new InternalSearchSpecResolver.Request(
+                        input.missionId(),
+                        effectId(input, "internal-search"),
+                        input.request().query(),
+                        input.intent().requiresCompanyGraph()
+                )
         );
+        Plan plan = extraction.plan();
+        List<RootResult> rootResults = new ArrayList<>();
+        List<EvidenceRef> refs = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
 
-        Objects.requireNonNull(
-                context,
-                "context must not be null"
+        for (int i = 0; i < plan.queries().size(); i++) {
+            RootQuery rootQuery = plan.queries().get(i);
+            var spec = internalSearchSpecResolver.searchSpec(
+                    effectId(input, "internal-search") + ":root:" + i,
+                    rootQuery
+            );
+            ResolveInternalContextStep.Result result = internalStep.search(
+                    input.request().context(), spec
+            );
+
+            RootResult rootResult = InternalRootSelection.evaluate(
+                    plan.mode(), rootQuery, result.candidates(),
+                    result.backendAmbiguous(), result.exhaustive()
+            );
+            rootResults.add(rootResult);
+            refs.addAll(result.evidenceRefs());
+            warnings.addAll(result.warnings());
+            if (rootResult.outcome() != Outcome.RESOLVED
+                    && rootResult.outcome() != Outcome.EMPTY) {
+                warnings.add(rootResult.detail());
+            }
+            LOGGER.info(
+                    "Internal root mode={} query=[{}] type={} outcome={} matched={} exhaustive={}",
+                    plan.mode(), rootQuery.query(), rootQuery.type(),
+                    rootResult.outcome(), rootResult.matched().size(), result.exhaustive()
+            );
+        }
+
+        Selection selection = new Selection(plan, rootResults);
+        Map<String, Object> attributes = new LinkedHashMap<>(extraction.debug());
+        attributes.put("rootSelectionMode", plan.mode().name());
+        attributes.put("rootQueryCount", plan.queries().size());
+        attributes.put("selectedRootCount", selection.selected().size());
+        attributes.put("rootResolutionReady", selection.ready());
+        attributes.put("rootResolutionSummary", selection.explanation());
+        Map<String, Object> debug = Map.copyOf(attributes);
+        List<EvidenceRef> evidenceRefs = refs.stream().distinct().toList();
+        String summary = selection.ready()
+                ? "Resolved " + selection.selected().size() + " root entities using " + plan.mode()
+                : "Incomplete root resolution: " + selection.explanation();
+
+        // Reassessment ranks actions; it does not override typed root correctness.
+        Candidate unique = plan.mode() == Mode.UNIQUE && selection.selected().size() == 1
+                ? selection.selected().getFirst() : null;
+        UtilityAssessment utility = reassess(
+                input, context, INTERNAL_SEARCH, summary, debug, evidenceRefs,
+                unique == null ? "" : unique.entityId(),
+                unique == null ? "" : unique.nodeType().name()
         );
-
-        InternalSearchSpecResolver.Resolution resolution =
-                internalSearchSpecResolver.resolve(
-                        new InternalSearchSpecResolver.Request(
-                                input.missionId(),
-                                effectId(input, "internal-search"),
-                                input.request().query(),
-                                input.intent().requiresCompanyGraph()
-                        )
-                );
-        LOGGER.info(
-                "Internal root search resolved query=[{}] nodeTypes={} traversalRequired={}",
-                resolution.spec().query(),
-                resolution.spec().allowedNodeTypes(),
-                input.intent().requiresCompanyGraph()
-        );
-
-        LOGGER.debug(
-                "Internal search query=[{}] types={} strategy={}",
-                resolution.spec().query(),
-                resolution.spec().allowedNodeTypes(),
-                resolution.strategy()
-        );
-
-        ResolveInternalContextStep.Result result =
-                internalStep.search(input.request().context(), resolution.spec());
-
-        LOGGER.info(
-                "Internal root search result entityId=[{}] nodeType={} attributes={} warnings={}",
-                result.resolvedEntityId(),
-                result.resolvedNodeType(),
-                result.attributes(),
-                result.warnings()
-        );
-
-        Map<String, Object> attributes = new LinkedHashMap<>(result.attributes());
-        attributes.putAll(resolution.debug());
-        Map<String, Object> resolvedAttributes = Map.copyOf(attributes);
-
-
-        boolean ambiguous = Boolean.TRUE.equals(result.attributes().get("ambiguous"));
-
-        UtilityAssessment utility =
-                reassess(
-                        input,
-                        context,
-                        INTERNAL_SEARCH,
-                        result.summary(),
-                        resolvedAttributes,
-                        result.evidenceRefs(),
-                        result.resolvedEntityId(),
-                        result.resolvedNodeType()
-                                .name()
-                );
-
         return new InternalSearchState(
-                true,
-                result.evidenceRefs(),
-                result.warnings(),
-                result.summary(),
-                resolvedAttributes,
-                result.resolvedEntityId(),
-                result.resolvedNodeType(),
-                ambiguous,
-                utility
+                true, evidenceRefs, warnings.stream().distinct().toList(),
+                summary, debug, selection, utility
         );
     }
 
@@ -483,7 +496,7 @@ public final class MissionAgent {
 
     @Action(
             description =
-                    "Expand a resolved internal entity through the company graph",
+                    "Resolve required company graph relationships and output fields",
             readOnly = true,
             cost = 0.15,
             valueMethod = "companyGraphValue"
@@ -493,65 +506,92 @@ public final class MissionAgent {
             InternalSearchState searchState,
             OperationContext context
     ) {
-        Objects.requireNonNull(
-                input,
-                "input must not be null"
-        );
+        Objects.requireNonNull(input, "input");
+        Objects.requireNonNull(searchState, "searchState");
+        Objects.requireNonNull(context, "context");
 
-        Objects.requireNonNull(
-                searchState,
-                "searchState must not be null"
-        );
-
-        Objects.requireNonNull(
-                context,
-                "context must not be null"
-        );
-
-        if (!searchState.hasResolvedEntity()) {
-            return CompanyGraphState.skipped(
-                    "No unique internal entity was available "
-                            + "for company graph expansion",
-                    searchState.utility()
-            );
+        if (!capabilityAllowed(input, COMPANY_GRAPH)) {
+            return CompanyGraphState.skipped("Company graph is not allowed", searchState.utility());
+        }
+        Selection selection = searchState.selection();
+        if (!selection.ready()) {
+            return CompanyGraphState.skipped("Unresolved root set: " + selection.explanation(),
+                    searchState.utility());
+        }
+        List<Candidate> candidates = selection.selected();
+        if (candidates.isEmpty()) {
+            return CompanyGraphState.skipped("Exhaustive search returned no matching roots",
+                    searchState.utility());
+        }
+        if (candidates.size() > maxGraphRoots) {
+            return CompanyGraphState.skipped("Graph root count exceeds configured limit",
+                    searchState.utility());
         }
 
-        GraphSpec spec =
-                new GraphSpec(
-                        effectId(input, "company-graph"),
-                        searchState.resolvedEntityId(),
-                        searchState.resolvedNodeType(),
-                        3,
-                        50
-                );
+        long deadline = System.nanoTime() + maxGraphBatchMillis * 1_000_000L;
+        List<RootGraphOutcome> outcomes = new ArrayList<>();
+        List<EvidenceRef> allRefs = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        List<Map<String, Object>> verifiedRows = new ArrayList<>();
+        Status overall = Status.COMPLETE;
 
-        ResolveInternalContextStep.Result result =
-                internalStep.readCompanyGraph(
-                        input.request()
-                                .context(),
-                        spec
-                );
+        for (int i = 0; i < candidates.size(); i++) {
+            if (System.nanoTime() >= deadline) {
+                overall = Status.INSUFFICIENT;
+                warnings.add("Graph batch exceeded its global time budget; no partial answer is complete");
+                break;
+            }
+            Candidate candidate = candidates.get(i);
+            var result = graphTraversalStep.execute(
+                    input.request().context(),
+                    effectId(input, "company-graph") + ":root:" + i,
+                    candidate.entityId(), candidate.nodeType(), input.intent(),
+                    selection.plan().perRootGraphQuestion()
+            );
+            outcomes.add(new RootGraphOutcome(candidate, result.status(), result.evidenceRefs(),
+                    result.summary(), result.attributes()));
+            warnings.addAll(result.warnings());
+            if (result.status() != Status.COMPLETE) {
+                overall = result.status();
+                warnings.add("Root '" + candidate.label() + "' failed: " + result.summary());
+                break; // Never advertise an incomplete batch as a complete answer.
+            }
+            allRefs.addAll(result.evidenceRefs());
+            Object rows = result.attributes().get("validatedGraphAnswerRows");
+            if (rows instanceof List<?> verified) {
+                for (Object row : verified) {
+                    verifiedRows.add(Map.of(
+                            "rootEntityId", candidate.entityId(),
+                            "rootNodeType", candidate.nodeType().name(),
+                            "rootLabel", candidate.label(),
+                            "verifiedAnswer", row
+                    ));
+                }
+            }
+        }
 
-        UtilityAssessment utility =
-                reassess(
-                        input,
-                        context,
-                        COMPANY_GRAPH,
-                        result.summary(),
-                        result.attributes(),
-                        result.evidenceRefs(),
-                        searchState.resolvedEntityId(),
-                        searchState.resolvedNodeType()
-                                .name()
-                );
-
+        if (outcomes.size() != candidates.size() && overall == Status.COMPLETE) {
+            overall = Status.INSUFFICIENT;
+            warnings.add("Not all required roots were processed");
+        }
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("graphResolutionStatus", overall.name());
+        attributes.put("rootSelectionMode", selection.plan().mode().name());
+        attributes.put("requestedRoots", candidates.size());
+        attributes.put("processedRoots", outcomes.size());
+        attributes.put("validatedGraphAnswerRows", List.copyOf(verifiedRows));
+        String summary = overall == Status.COMPLETE
+                ? "Resolved all " + candidates.size() + " graph roots"
+                : "Company graph requirements incomplete: " + String.join("; ", warnings);
+        List<EvidenceRef> evidenceRefs = overall == Status.COMPLETE
+                ? allRefs.stream().distinct().toList() : List.of();
+        Map<String, Object> debug = Map.copyOf(attributes);
+        UtilityAssessment utility = overall == Status.COMPLETE
+                ? reassess(input, context, COMPANY_GRAPH, summary, debug, evidenceRefs, "", "")
+                : searchState.utility();
         return new CompanyGraphState(
-                true,
-                result.evidenceRefs(),
-                result.warnings(),
-                result.summary(),
-                result.attributes(),
-                utility
+                true, overall, evidenceRefs, warnings.stream().distinct().toList(),
+                summary, debug, List.copyOf(outcomes), utility
         );
     }
 
@@ -563,7 +603,8 @@ public final class MissionAgent {
     ) {
         if (input == null
                 || searchState == null
-                || !searchState.hasResolvedEntity()
+                || !searchState.selection().ready()
+                || searchState.selection().selected().isEmpty()
                 || !capabilityAllowed(
                 input,
                 COMPANY_GRAPH
@@ -633,6 +674,11 @@ public final class MissionAgent {
                 context.objectsOfType(
                         EvidenceState.class
                 );
+
+        // Exhaustive ALL_MATCHES with zero roots is a grounded negative result,
+        // not an ambiguous search and not permission for model-memory synthesis.
+        MissionResult emptyRoots = exhaustiveEmptyRootsResult(input, evidenceStates);
+        if (emptyRoots != null) return emptyRoots;
 
         /*
          * Retrieval was required and was attempted, but did not produce
@@ -753,7 +799,7 @@ public final class MissionAgent {
                 "embabelGraph",
                 List.of(
                         "MissionRunInput",
-                        "FrozenMissionIntent",
+                        "MissionIntent",
                         "EvidenceActions",
                         "MissionResult"
                 )
@@ -845,10 +891,24 @@ public final class MissionAgent {
          */
         if (intent.requiresCompanyGraph()
                 && internalState != null
-                && internalState.hasResolvedEntity()
+                && internalState.selection().ready()
+                && !internalState.selection().selected().isEmpty()
                 && capabilityAllowed(input, COMPANY_GRAPH)
                 && blackboard.last(CompanyGraphState.class) == null) {
             return 0.0d;
+        }
+        CompanyGraphState graphState =
+                blackboard == null
+                        ? null
+                        : blackboard.last(CompanyGraphState.class);
+
+        if (graphState != null
+                && graphState.resolutionStatus() != GraphTraversal.Status.COMPLETE) {
+            /*
+             * complete() will return the deterministic unresolved result.
+             * A low synthesis utility must not leave the mission stuck.
+             */
+            return 1.0d;
         }
 
         if (!intent.requiresRetrieval()) {
@@ -917,54 +977,75 @@ public final class MissionAgent {
             List<String> warnings,
             String summary,
             Map<String, Object> attributes,
-            String resolvedEntityId,
-            InternalGraphNodeType resolvedNodeType,
-            boolean ambiguous,
+            Selection selection,
             UtilityAssessment utility
     ) implements EvidenceState {
-
         public InternalSearchState {
-            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
-
-            warnings = warnings == null ? List.of() : List.copyOf(warnings);
-            summary = summary == null ? "" : summary;
-            attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
-            resolvedEntityId = resolvedEntityId == null ? "" : resolvedEntityId;
-
-            resolvedNodeType =
-                    resolvedNodeType == null ? InternalGraphNodeType.INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED
-                            : resolvedNodeType;
-
-            utility = Objects.requireNonNull(utility, "utility must not be null");
+            evidenceRefs = List.copyOf(Objects.requireNonNull(evidenceRefs, "evidenceRefs"));
+            warnings = List.copyOf(Objects.requireNonNull(warnings, "warnings"));
+            summary = Objects.requireNonNull(summary, "summary");
+            attributes = Map.copyOf(Objects.requireNonNull(attributes, "attributes"));
+            selection = Objects.requireNonNull(selection, "selection");
+            utility = Objects.requireNonNull(utility, "utility");
         }
 
-        public boolean hasResolvedEntity() {
-            return !ambiguous
-                    && !resolvedEntityId.isBlank()
-                    && resolvedNodeType
-                    != InternalGraphNodeType
-                    .INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED
-                    && resolvedNodeType
-                    != InternalGraphNodeType.UNRECOGNIZED;
+        public List<Candidate> candidateRoots() {
+            return selection.selected();
+        }
+    }
+
+    public record RootGraphOutcome(
+            Candidate root,
+            Status status,
+            List<EvidenceRef> evidenceRefs,
+            String summary,
+            Map<String, Object> attributes
+    ) {
+        public RootGraphOutcome {
+            root = Objects.requireNonNull(root, "root");
+            status = Objects.requireNonNull(status, "status");
+            evidenceRefs = List.copyOf(Objects.requireNonNull(evidenceRefs, "evidenceRefs"));
+            summary = Objects.requireNonNull(summary, "summary");
+            attributes = Map.copyOf(Objects.requireNonNull(attributes, "attributes"));
         }
     }
 
     public record CompanyGraphState(
             boolean performed,
+            Status resolutionStatus,
             List<EvidenceRef> evidenceRefs,
             List<String> warnings,
             String summary,
             Map<String, Object> attributes,
+            List<RootGraphOutcome> rootOutcomes,
             UtilityAssessment utility
     ) implements EvidenceState {
 
         public CompanyGraphState {
-            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
-            warnings = warnings == null ? List.of() : List.copyOf(warnings);
-            summary = summary == null ? "" : summary;
-            attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
+            resolutionStatus = Objects.requireNonNull(
+                    resolutionStatus,
+                    "resolutionStatus must not be null"
+            );
 
-            utility = Objects.requireNonNull(utility, "utility must not be null");
+            evidenceRefs = evidenceRefs == null
+                    ? List.of()
+                    : List.copyOf(evidenceRefs);
+
+            warnings = warnings == null
+                    ? List.of()
+                    : List.copyOf(warnings);
+
+            summary = summary == null ? "" : summary;
+
+            attributes = attributes == null
+                    ? Map.of()
+                    : Map.copyOf(attributes);
+
+            rootOutcomes = List.copyOf(Objects.requireNonNull(rootOutcomes, "rootOutcomes"));
+            utility = Objects.requireNonNull(
+                    utility,
+                    "utility must not be null"
+            );
         }
 
         public static CompanyGraphState skipped(
@@ -973,10 +1054,16 @@ public final class MissionAgent {
         ) {
             return new CompanyGraphState(
                     false,
+                    GraphTraversal.Status.INSUFFICIENT,
                     List.of(),
-                    List.of(),
+                    List.of(summary),
                     summary,
-                    Map.of("skipped", true),
+                    Map.of(
+                            "skipped", true,
+                            "graphResolutionStatus",
+                            GraphTraversal.Status.INSUFFICIENT.name()
+                    ),
+                    List.of(),
                     utility
             );
         }
@@ -1102,6 +1189,29 @@ public final class MissionAgent {
      *
      * The synthesis LLM is not permitted to fill this gap from model memory.
      */
+    private static MissionResult exhaustiveEmptyRootsResult(
+            MissionRunInput input, List<EvidenceState> evidenceStates
+    ) {
+        InternalSearchState search = evidenceStates.stream()
+                .filter(InternalSearchState.class::isInstance)
+                .map(InternalSearchState.class::cast)
+                .findFirst().orElse(null);
+        if (search == null
+                || search.selection().plan().mode() != Mode.ALL_MATCHES
+                || !search.selection().ready()
+                || !search.selection().selected().isEmpty()) {
+            return null;
+        }
+        return new MissionResult(
+                input.missionId(),
+                "No matching internal entities",
+                "No internal entities matched the requested criteria in the selected tenant.",
+                List.of(), List.of(), List.of(), List.of(), List.of(),
+                List.of(), Map.of("grounded", true, "result", "EXHAUSTIVE_EMPTY_ROOT_SET"),
+                Map.of("rootSelectionMode", Mode.ALL_MATCHES.name(), "rootCount", 0)
+        );
+    }
+
     private static MissionResult insufficientEvidenceResult(
             MissionRunInput input,
             List<EvidenceState> evidenceStates
@@ -1142,16 +1252,34 @@ public final class MissionAgent {
         }
 
         if (intent.requiresInternalContext()
-                && (internalState == null || internalState.evidenceRefs().isEmpty())) {
-            missing.add("internal context");
+                && (internalState == null
+                || !internalState.selection().ready()
+                || (internalState.evidenceRefs().isEmpty()
+                    && !internalState.selection().selected().isEmpty()))) {
+            missing.add(internalState == null ? "internal context" :
+                    "internal root selection: " + internalState.selection().explanation());
         }
 
         if (intent.requiresCompanyGraph()) {
-            if (internalState == null || !internalState.hasResolvedEntity()) {
-                missing.add("an unambiguous internal entity");
-            } else if (companyGraphState == null
-                    || companyGraphState.evidenceRefs().isEmpty()) {
-                missing.add("company graph context");
+            if (internalState == null || !internalState.selection().ready()) {
+                missing.add("resolved internal root set" +
+                        (internalState == null ? "" : ": " + internalState.selection().explanation()));
+            } else if (companyGraphState == null) {
+                missing.add("company graph execution");
+            }
+        }
+
+        if (companyGraphState != null) {
+            if (companyGraphState.resolutionStatus() != Status.COMPLETE) {
+                missing.add(
+                        "company graph requirements ["
+                                + companyGraphState.resolutionStatus().name()
+                                + "]: "
+                                + companyGraphState.summary()
+                );
+
+            } else if (companyGraphState.evidenceRefs().isEmpty()) {
+                missing.add("company graph evidence");
             }
         }
 
@@ -1166,10 +1294,9 @@ public final class MissionAgent {
                 );
 
         String answer =
-                "SparrowX could not produce a grounded answer because "
-                        + "the required "
+                "SparrowX could not establish all required evidence: "
                         + requirement
-                        + " was not found.";
+                        + ".";
 
         List<String> warnings =
                 evidenceStates.stream()
