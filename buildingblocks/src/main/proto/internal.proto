@@ -123,6 +123,9 @@ service InternalService {
       DescribeInternalCompanyGraphResponse
       );
 
+  rpc ExecuteInternalCompanyGraphQuery(ExecuteInternalCompanyGraphQueryRequest)
+      returns (ExecuteInternalCompanyGraphQueryResponse);
+
 
 }
 
@@ -145,6 +148,86 @@ message ExpandInternalCompanyGraphRequest {
 message ExpandInternalCompanyGraphResponse {
   InternalGraph graph = 1;
   bool truncated = 2;
+}
+
+// All variables, fields and relationship triples are checked against the tenant ontology.
+// The server authenticates tenant and actor from transport context, never from these fields alone.
+message ExecuteInternalCompanyGraphQueryRequest {
+  RequestContext context = 1;
+  string root_type = 2;
+  repeated string root_entity_ids = 3;
+  repeated GraphQueryTraverse traversals = 4;
+  repeated GraphQueryPredicate predicates = 5;
+  repeated GraphQueryProjection projections = 6;
+  int32 max_rows = 7;
+  bool require_complete = 8;
+}
+
+message GraphQueryTraverse {
+  string source = 1;
+  string relationship_variable = 2;
+  string relationship_type = 3;
+  GraphQueryDirection direction = 4;
+  string target = 5;
+  string target_type = 6;
+}
+
+enum GraphQueryDirection {
+  GRAPH_QUERY_DIRECTION_UNSPECIFIED = 0;
+  GRAPH_QUERY_DIRECTION_IN = 1;
+  GRAPH_QUERY_DIRECTION_OUT = 2;
+}
+
+message GraphQueryPredicate {
+  string variable = 1;
+  string field = 2;
+  GraphQueryCompare compare = 3;
+  GraphQueryValue value = 4;
+}
+
+enum GraphQueryCompare {
+  GRAPH_QUERY_COMPARE_UNSPECIFIED = 0;
+  GRAPH_QUERY_COMPARE_EQ = 1;
+  GRAPH_QUERY_COMPARE_NE = 2;
+  GRAPH_QUERY_COMPARE_CONTAINS = 3;
+  GRAPH_QUERY_COMPARE_IN = 4;
+  GRAPH_QUERY_COMPARE_GT = 5;
+  GRAPH_QUERY_COMPARE_GE = 6;
+  GRAPH_QUERY_COMPARE_LT = 7;
+  GRAPH_QUERY_COMPARE_LE = 8;
+}
+
+message GraphQueryProjection {
+  string variable = 1;
+  string field = 2;
+  string alias = 3;
+}
+
+// An unset oneof is a missing value. No precision loss for 64-bit integers.
+message GraphQueryValue {
+  oneof kind {
+    string text = 1;
+    int64 integer = 2;
+    double decimal = 3;
+    bool boolean = 4;
+    GraphQueryValues items = 5;
+  }
+}
+
+message GraphQueryValues { repeated GraphQueryValue values = 1; }
+
+message GraphQueryRow {
+  string root_entity_id = 1;
+  map<string, GraphQueryValue> values = 2;
+  map<string, string> nodes = 3;
+  map<string, string> relationships = 4;
+}
+
+message ExecuteInternalCompanyGraphQueryResponse {
+  repeated GraphQueryRow rows = 1;
+  bool truncated = 2;
+  repeated string evaluated_root_entity_ids = 3;
+  google.protobuf.Timestamp retrieved_at = 4;
 }
 
 // ========================
