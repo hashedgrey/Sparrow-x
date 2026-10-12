@@ -18,14 +18,10 @@ public final class LlmConfig {
     @Bean
     @ConditionalOnMissingBean(StructuredLlmClient.class)
     public StructuredLlmClient structuredLlmClient(
-            @Qualifier("activeMainLlm")
-            LlmService<?> activeMainLlm,
+            @Qualifier("activeMainLlm") LlmService<?> activeMainLlm,
             ObjectMapper objectMapper
     ) {
-        return new StructuredLlmClient(
-                activeMainLlm,
-                objectMapper
-        );
+        return new StructuredLlmClient(activeMainLlm, objectMapper);
     }
 
     @Bean
@@ -34,10 +30,7 @@ public final class LlmConfig {
             StructuredLlmClient llmClient,
             ObjectMapper objectMapper
     ) {
-        return new LlmDecisionEngine(
-                llmClient,
-                objectMapper
-        );
+        return new LlmDecisionEngine(llmClient, objectMapper);
     }
 
     @Bean
@@ -46,9 +39,6 @@ public final class LlmConfig {
             SystemOneDecisionEngine systemOneDecisionEngine,
             LlmDecisionEngine llmDecisionEngine
     ) {
-        return new SemanticDecisionService(
-                systemOneDecisionEngine,
-                llmDecisionEngine
-        );
+        return new SemanticDecisionService(systemOneDecisionEngine, llmDecisionEngine);
     }
 }
