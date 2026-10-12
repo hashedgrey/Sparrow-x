@@ -1,7 +1,7 @@
 package com.sparrowx.internal.features.expandinternalcompanygraph;
 
 import buildingblocks.core.queries.QueryHandler;
-import com.sparrowx.internal.data.postgres.graph.PostgresCompanyGraphReadClient;
+import com.sparrowx.internal.data.neo4j.graph.Neo4jCompanyGraphReadClient;
 import com.sparrowx.internal.exceptions.InternalValidationException;
 import org.springframework.stereotype.Component;
 
@@ -14,10 +14,10 @@ public final class ExpandInternalCompanyGraphQueryHandler
         ExpandInternalCompanyGraphResult
         > {
 
-    private final PostgresCompanyGraphReadClient graphReadClient;
+    private final Neo4jCompanyGraphReadClient graphReadClient;
 
     public ExpandInternalCompanyGraphQueryHandler(
-            PostgresCompanyGraphReadClient graphReadClient
+            Neo4jCompanyGraphReadClient graphReadClient
     ) {
         this.graphReadClient = Objects.requireNonNull(
                 graphReadClient,

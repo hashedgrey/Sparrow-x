@@ -37,10 +37,14 @@ spring:
         enabled: false
 
 
+internal:
   graph:
-    expansion:
-      max-frontier-nodes: 500
-      max-edges: 5000
+    neo4j:
+      uri: ${INTSVC_NEO4J_URI:bolt://localhost:7687}
+      username: ${INTSVC_NEO4J_USERNAME:neo4j}
+      password: ${INTSVC_NEO4J_PASSWORD:password}
+      database: ${INTSVC_NEO4J_DATABASE:neo4j}
+      dev-insecure-auth: true
 
 server:
   port: 8084

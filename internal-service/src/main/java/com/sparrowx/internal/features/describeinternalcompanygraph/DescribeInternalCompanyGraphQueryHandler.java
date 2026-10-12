@@ -1,7 +1,7 @@
 package com.sparrowx.internal.features.describeinternalcompanygraph;
 
 import buildingblocks.core.queries.QueryHandler;
-import com.sparrowx.internal.data.postgres.graph.PostgresCompanyGraphOntologyReader;
+import com.sparrowx.internal.data.neo4j.graph.Neo4jCompanyGraphOntologyReader;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -16,10 +16,10 @@ public final class DescribeInternalCompanyGraphQueryHandler
         DescribeInternalCompanyGraphQuery,
         DescribeInternalCompanyGraphResult> {
 
-    private final PostgresCompanyGraphOntologyReader reader;
+    private final Neo4jCompanyGraphOntologyReader reader;
 
     public DescribeInternalCompanyGraphQueryHandler(
-            PostgresCompanyGraphOntologyReader reader
+            Neo4jCompanyGraphOntologyReader reader
     ) {
         this.reader = Objects.requireNonNull(reader, "reader is required");
     }
