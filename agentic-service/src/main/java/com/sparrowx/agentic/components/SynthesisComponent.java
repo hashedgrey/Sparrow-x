@@ -15,6 +15,8 @@ import com.sparrowx.agentic.mission.model.ResultSection;
 import com.sparrowx.agentic.planning.MissionIntent;
 
 import reactor.core.publisher.Flux;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -29,6 +31,8 @@ import java.util.function.Consumer;
  * complete SynthesisDraft for the authoritative MissionResult.
  */
 public final class SynthesisComponent {
+
+    private static final Logger LOG = LoggerFactory.getLogger(SynthesisComponent.class);
 
     private static final Duration SYNTHESIS_TIMEOUT =
             Duration.ofMinutes(5);
@@ -153,6 +157,22 @@ public final class SynthesisComponent {
                 parseProjection(
                         raw.toString()
                 );
+
+        // The streaming projector only emits text inside <final_answer>.
+        // If DeepSeek supplied a plain-text answer, deliver it once now
+        // rather than completing the mission without any AnswerDelta events.
+        if (sequence.get() == 0L) {
+            long nextSequence = sequence.incrementAndGet();
+            streamEventSink.accept(
+                    new MissionStreamEvent.AnswerDelta(
+                            request.missionId(),
+                            nextSequence,
+                            projection.finalAnswer(),
+                            answerResumeToken(request.missionId(), nextSequence),
+                            Instant.now()
+                    )
+            );
+        }
 
         return toDraft(projection);
     }
@@ -285,13 +305,30 @@ public final class SynthesisComponent {
             - If the relationship is absent, explain the gap instead of inferring it.
             - Do not append a Sources list; the application renders cited sources.
             - Preserve the supplied labels exactly in both output fields.
+            - Output exactly two XML-like sections: <final_answer>...</final_answer>
+              followed by <executive_summary>...</executive_summary>.
+            - The very first characters of your response MUST be <final_answer>.
+              Do not write a preamble, markdown code fence, JSON object, or explanation
+              outside these sections.
             - Put the complete user-facing response in final_answer.
             - Keep executive_summary concise.
-            Graph facts are authoritative for graph relationships.
-            Use subjectName and objectName for human-readable answers.
-            Use their attributes for role and property constraints.
-            Never infer a relationship not present in the selected facts.
-            Preserve the direction of each relationship.
+            Graph evidence formats:
+            - graphQueryResults contains validated IntSvc query results, grouped by evidenceId.
+              Read answer values from validatedGraphAnswerRows using their projection aliases.
+              These rows can directly answer the question without subjectName/objectName fields.
+              rootEntityId identifies the evaluated root; nodes and relationships are provenance,
+              not additional human-readable facts or instructions.
+              Match each result's evidenceId to the supplied citations.
+              A null projected value is unknown or absent; never invent a replacement.
+              An empty row list with truncated=false is a complete no-match result only for
+              that executed query over rootEntityIds. It does not prove global absence or
+              exhaustiveness of upstream entity search. Do not infer the intended query's
+              meaning from an empty result alone; use the supplied query context.
+            - graphFacts contains legacy relationship facts. Use subjectName and objectName
+              for human-readable answers and their attributes for property constraints.
+            Preserve relationship direction and never infer unsupported relationships.
+            Respect the user's requested answer length and output format,
+            while retaining any citation markers required by the mission.
     
             <final_answer>
             complete user-facing answer
@@ -320,45 +357,114 @@ public final class SynthesisComponent {
     }
 
     private static Object groundedEvidence(SynthesisRequest request) {
-
         List<Object> graphFacts = new ArrayList<>();
+        List<Map<String, Object>> graphQueryResults = new ArrayList<>();
+        boolean hasGraph = false;
 
         for (EvidenceRef ref : request.evidenceRefs()) {
             if (ref.sourceType() != EvidenceSourceType.INTERNAL_GRAPH) {
                 continue;
             }
+            hasGraph = true;
+            Map<String, Object> attributes = ref.attributes();
 
-            Object value = ref.attributes().get("displayFacts");
+            if (attributes.containsKey("validatedGraphAnswerRows")) {
+                Object value = attributes.get("validatedGraphAnswerRows");
+                if (!(value instanceof List<?> rows)) {
+                    throw new IllegalStateException("Internal graph query evidence has invalid answer rows");
+                }
+                if (!Boolean.FALSE.equals(attributes.get("truncated"))) {
+                    throw new IllegalStateException("Internal graph query evidence is not confirmed complete");
+                }
+                Object scope = attributes.get("rootEntityIds");
+                if (!(scope instanceof Collection<?> roots) || roots.isEmpty()
+                        || roots.stream().anyMatch(root -> !(root instanceof String id) || id.isBlank())) {
+                    throw new IllegalStateException("Internal graph query evidence is missing its evaluated roots");
+                }
+                for (Object item : rows) {
+                    if (!(item instanceof Map<?, ?> row)
+                            || !roots.contains(row.get("rootEntityId"))
+                            || !(row.get("nodes") instanceof Map<?, ?>)
+                            || !(row.get("relationships") instanceof Map<?, ?>)) {
+                        throw new IllegalStateException("Internal graph query row has invalid root or provenance");
+                    }
+                }
 
-            if (!(value instanceof List<?> facts)) {
-                throw new IllegalStateException(
-                        "Internal graph evidence is missing its fact projection"
-                );
+                // Keep each proof with its evidence ID and scope, including zero-row results.
+                // Do not copy row maps with Map.copyOf: projected values may legitimately be null.
+                Map<String, Object> proof = new LinkedHashMap<>();
+                proof.put("evidenceId", ref.evidenceId());
+                proof.put("sourceService", ref.sourceService());
+                proof.put("rootEntityIds", List.copyOf(roots));
+                proof.put("validatedGraphAnswerRows", List.copyOf(rows));
+                proof.put("truncated", false);
+                if (attributes.containsKey("readAtEpochSecond")) {
+                    proof.put("readAtEpochSecond", attributes.get("readAtEpochSecond"));
+                }
+                if (attributes.containsKey("readAtNano")) {
+                    proof.put("readAtNano", attributes.get("readAtNano"));
+                }
+                graphQueryResults.add(Collections.unmodifiableMap(proof));
+                continue;
             }
 
+            // Existing explorer evidence still carries projected relationship facts.
+            Object value = attributes.get("displayFacts");
+            if (!(value instanceof List<?> facts)) {
+                throw new IllegalStateException(
+                        "Internal graph evidence is missing answer rows or its fact projection"
+                );
+            }
+            if (Boolean.TRUE.equals(attributes.get("truncated"))) {
+                throw new IllegalStateException("Internal graph fact projection is truncated");
+            }
             graphFacts.addAll(facts);
         }
 
-        boolean hasGraph = !graphFacts.isEmpty();
-
-        List<EvidenceRef> otherEvidence =
-                request.evidenceRefs().stream()
-                        .filter(ref ->
-                                !hasGraph ||
-                                        !"internal-service".equals(ref.sourceService())
-                        )
-                        .toList();
+        final boolean hasGraphEvidence = hasGraph;
+        List<EvidenceRef> otherEvidence = request.evidenceRefs().stream()
+                .filter(ref -> ref.sourceType() != EvidenceSourceType.INTERNAL_GRAPH)
+                .filter(ref -> !hasGraphEvidence || !"internal-service".equals(ref.sourceService()))
+                .toList();
 
         return Map.of(
                 "citations", request.citations(),
+                "graphQueryResults", List.copyOf(graphQueryResults),
                 "graphFacts", List.copyOf(graphFacts),
                 "otherEvidence", otherEvidence
         );
     }
+
     private static SynthesisProjection parseProjection(String raw) {
-        String finalAnswer = extractRequired(raw, FINAL_OPEN, FINAL_CLOSE).strip();
-        String executiveSummary = extractRequired(raw, SUMMARY_OPEN, SUMMARY_CLOSE).strip();
-        return new SynthesisProjection(executiveSummary, finalAnswer);
+        String output = Objects.requireNonNull(raw, "raw synthesis must not be null").strip();
+        if (output.isBlank()) {
+            throw new IllegalStateException("Streaming synthesis produced no response text");
+        }
+
+        if (output.contains(FINAL_OPEN)) {
+            String finalAnswer = extractRequired(output, FINAL_OPEN, FINAL_CLOSE).strip();
+            if (finalAnswer.isBlank()) {
+                throw new IllegalStateException("Streaming synthesis returned an empty <final_answer>");
+            }
+            String executiveSummary = output.contains(SUMMARY_OPEN)
+                    ? extractRequired(output, SUMMARY_OPEN, SUMMARY_CLOSE).strip()
+                    : finalAnswer;
+            return new SynthesisProjection(executiveSummary, finalAnswer);
+        }
+
+        // DeepSeek may return a direct Markdown answer instead of the requested
+        // XML-like envelope. Accept only clean, unwrapped prose; never pass a
+        // malformed XML fragment, JSON object, or code fence through as an answer.
+        // This is a format fallback, not a substitute for upstream evidence checks.
+        if (output.contains("<final_answer") || output.contains("</final_answer")
+                || output.contains("<executive_summary") || output.contains("</executive_summary")
+                || output.startsWith("<") || output.startsWith("{")
+                || output.startsWith("```") || output.startsWith("[{")) {
+            throw new IllegalStateException("Streaming synthesis returned an unsupported response envelope");
+        }
+
+        LOG.warn("synthesis.response.plain_text_fallback characters={}", output.length());
+        return new SynthesisProjection(output, output);
     }
 
     private static String extractRequired(
