@@ -1,11 +1,16 @@
 package com.sparrowx.agentic.components;
 
 import com.sparrowx.agentic.mission.model.MissionPath;
-import com.sparrowx.agentic.systemone.SystemOneDecisionClient;
+import com.sparrowx.agentic.decision.SemanticDecisionService;
+import com.sparrowx.agentic.decision.SemanticDecisionService.Escalation;
+import com.sparrowx.agentic.decision.SemanticDecisionService.Request;
+import com.sparrowx.agentic.decision.SemanticDecisionService.Result;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionQuestion;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionResponse;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.NoulQuestion;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,67 +45,158 @@ public final class SystemOneUtilityComponent {
     public static final String SYNTHESIZE =
             "synthesize";
 
-    private final SystemOneDecisionClient decisionClient;
+    private static final Logger LOG = LoggerFactory.getLogger(SystemOneUtilityComponent.class);
+
+    private static final String DOCUMENT_ACTION = "document.evidence.build";
+    private static final String INTERNAL_ACTION = "internal.entities.search";
+    private static final String COMPANY_GRAPH_ACTION = "internal.company-graph.read";
+
+    private final SemanticDecisionService semantic;
 
     public SystemOneUtilityComponent(
-            SystemOneDecisionClient decisionClient
+            SemanticDecisionService semantic
     ) {
-        this.decisionClient = Objects.requireNonNull(decisionClient, "decisionClient must not be null");
+        this.semantic = Objects.requireNonNull(semantic, "semantic must not be null");
     }
 
+    /**
+     * Call from the mission with stable mission/request IDs so any LLM escalation
+     * is scoped to the actual mission rather than an invented identity.
+     */
     public UtilityAssessment evaluate(
-            UtilityRequest request
+            UtilityRequest request, String missionId, String requestId
     ) {
-        Objects.requireNonNull(request, "request must not be null");
-        DecisionResponse response = decisionClient.evaluate(state(request), questions());
+        Objects.requireNonNull(request, "request");
+        if (missionId == null || missionId.isBlank() || requestId == null || requestId.isBlank()) {
+            throw new IllegalArgumentException("Mission and request IDs are required for escalation");
+        }
 
-        double documentUtility = response.noulValue(DOCUMENT);
-        double internalUtility = response.noulValue(INTERNAL);
-        double companyGraphUtility = response.noulValue(COMPANY_GRAPH);
-        double learningGraphUtility = response.noulValue(LEARNING_GRAPH);
-        double synthesisUtility = response.noulValue(SYNTHESIZE);
+        Map<String, DecisionQuestion> questions = activeQuestions(request);
+        LOG.info("utility.system1.scope active={} skipped={}",
+                questions.keySet(), skippedCapabilities(questions));
+        Map<String, Object> state = state(request);
+        Map<String, Object> number = Map.of("type", "number", "minimum", 0, "maximum", 1);
+        Map<String, Object> properties = new LinkedHashMap<>();
+        questions.keySet().forEach(field -> properties.put(field, number));
+        Map<String, Object> schema = Map.of(
+                "type", "object",
+                "properties", Map.copyOf(properties),
+                "required", List.copyOf(properties.keySet()),
+                "additionalProperties", false);
 
-        /*
-         * Frozen mission intent establishes the initial capability boundary.
-         *
-         * Hybrid may unlock document retrieval later, but only when already
-         * collected evidence explicitly exposes a document dependency.
-         */
-        if (!request.requiresDocumentEvidence()
-                && !hasDocumentDiscoverySignal(
-                request.evidence()
-        )) {
+        Result result = semantic.evaluate(new Request(
+                state, questions, 0.80d, Set.of(),
+                new Escalation(
+                        missionId, "assess-action-utility",
+                        requestId + ":utility:" + request.latestAction(),
+                        "Assess marginal utility of only the named available capabilities "
+                                + "given the evidence supplied. Return numerical probabilities "
+                                + "from 0 to 1. Do not invent enterprise facts or new actions.",
+                        schema, 300, 0.0,
+                        Map.of("component", "system-one-utility", "purpose", "evidence-aware-ranking"))
+        ));
+        LOG.info("utility.system1.result escalatedFields={}", result.escalatedFields());
+        return assessment(request,
+                probabilityOrZero(result, questions, DOCUMENT),
+                probabilityOrZero(result, questions, INTERNAL),
+                probabilityOrZero(result, questions, COMPANY_GRAPH),
+                probabilityOrZero(result, questions, LEARNING_GRAPH),
+                probabilityOrZero(result, questions, SYNTHESIZE),
+                result.escalated() ? result.llmProvider() : result.systemOne().provider(),
+                result.escalated() ? result.llmModel() : result.systemOne().model(),
+                safe(result.systemOne().requestId()));
+    }
 
+    /**
+     * Compatibility entry point without mission identifiers: System-1 only.
+     * Use the three-argument overload for mission execution and LLM fallback.
+     */
+    public UtilityAssessment evaluate(UtilityRequest request) {
+        Objects.requireNonNull(request, "request");
+        Map<String, DecisionQuestion> questions = activeQuestions(request);
+        DecisionResponse bounded = semantic.tryBounded(
+                state(request), questions, 0.5d, "unscoped-utility")
+                .orElseThrow(() -> new IllegalStateException(
+                        "Unscoped System-1 utility failed; pass missionId and requestId for escalation"));
+        return assessment(request,
+                boundedProbabilityOrZero(bounded, questions, DOCUMENT),
+                boundedProbabilityOrZero(bounded, questions, INTERNAL),
+                boundedProbabilityOrZero(bounded, questions, COMPANY_GRAPH),
+                boundedProbabilityOrZero(bounded, questions, LEARNING_GRAPH),
+                boundedProbabilityOrZero(bounded, questions, SYNTHESIZE),
+                bounded.provider(), bounded.model(), bounded.requestId());
+    }
+
+    /**
+     * Apply the same deterministic capability gates as assessment() before
+     * asking System-1. Embabel hasRun flags prevent repeated evidence actions;
+     * scoring those actions after execution cannot affect the next plan.
+     *
+     * Always retain SYNTHESIZE so an empty decision request is never sent.
+     */
+    private static Map<String, DecisionQuestion> activeQuestions(UtilityRequest request) {
+        Map<String, DecisionQuestion> active = new LinkedHashMap<>(questions());
+        Set<String> executed = request.alreadyExecutedActions();
+
+        if ((!request.requiresDocumentEvidence()
+                && !hasDocumentDiscoverySignal(request.evidence()))
+                || executed.contains(DOCUMENT_ACTION)) {
+            active.remove(DOCUMENT);
+        }
+
+        if ((!request.requiresInternalContext()
+                && !hasInternalDiscoverySignal(request.evidence()))
+                || executed.contains(INTERNAL_ACTION)) {
+            active.remove(INTERNAL);
+        }
+
+        if (request.resolvedEntityId().isBlank()) {
+            active.remove(COMPANY_GRAPH);
+            active.remove(LEARNING_GRAPH);
+        } else if (executed.contains(COMPANY_GRAPH_ACTION)) {
+            active.remove(COMPANY_GRAPH);
+        }
+
+        return active;
+    }
+
+    private static Set<String> skippedCapabilities(Map<String, DecisionQuestion> active) {
+        java.util.Set<String> skipped = new java.util.LinkedHashSet<>(
+                List.of(DOCUMENT, INTERNAL, COMPANY_GRAPH, LEARNING_GRAPH, SYNTHESIZE));
+        skipped.removeAll(active.keySet());
+        return Set.copyOf(skipped);
+    }
+
+    private static double probabilityOrZero(
+            Result result, Map<String, DecisionQuestion> active, String capability) {
+        return active.containsKey(capability) ? result.probability(capability) : 0.0d;
+    }
+
+    private static double boundedProbabilityOrZero(
+            DecisionResponse response, Map<String, DecisionQuestion> active, String capability) {
+        return active.containsKey(capability) ? response.noulValue(capability) : 0.0d;
+    }
+
+    private UtilityAssessment assessment(
+            UtilityRequest request,
+            double documentUtility, double internalUtility, double companyGraphUtility,
+            double learningGraphUtility, double synthesisUtility,
+            String provider, String model, String requestId
+    ) {
+        // Policy/capability boundaries take precedence over model scores.
+        if (!request.requiresDocumentEvidence() && !hasDocumentDiscoverySignal(request.evidence())) {
             documentUtility = 0.0d;
         }
-
-        if (!request.requiresInternalContext()
-                && !hasInternalDiscoverySignal(
-                request.evidence()
-        )) {
-
+        if (!request.requiresInternalContext() && !hasInternalDiscoverySignal(request.evidence())) {
             internalUtility = 0.0d;
         }
-
-        /*
-         * Graph traversal is impossible/use-less until entity resolution
-         * produced an actual root.
-         */
         if (request.resolvedEntityId().isBlank()) {
             companyGraphUtility = 0.0d;
             learningGraphUtility = 0.0d;
         }
-
-        return new UtilityAssessment(
-                documentUtility,
-                internalUtility,
-                companyGraphUtility,
-                learningGraphUtility,
-                synthesisUtility,
-                decisionClient.provider(),
-                safe(response.model()),
-                safe(response.requestId())
-        );
+        return new UtilityAssessment(documentUtility, internalUtility,
+                companyGraphUtility, learningGraphUtility, synthesisUtility,
+                safe(provider), safe(model), safe(requestId));
     }
 
     private static boolean hasDocumentDiscoverySignal(

@@ -13,7 +13,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Semantic routing layer.
@@ -26,6 +29,8 @@ import java.util.Set;
  * - a field explicitly requires open-ended semantic extraction.
  */
 public final class SemanticDecisionService {
+
+    private static final Logger LOG = LoggerFactory.getLogger(SemanticDecisionService.class);
 
     private final SystemOneDecisionEngine systemOne;
     private final LlmDecisionEngine llm;
@@ -55,17 +60,30 @@ public final class SemanticDecisionService {
                 "request must not be null"
         );
 
-        DecisionResponse bounded =
-                systemOne.evaluate(
-                        request.state(),
-                        request.questions()
-                );
+        // No model-generated placeholder decisions. If System-1 is unavailable,
+        // escalate every requested bounded field using the provided schema.
+        DecisionResponse bounded;
+        boolean systemOneUnavailable = false;
+        long started = System.nanoTime();
+        try {
+            bounded = systemOne.evaluate(request.state(), request.questions());
+            LOG.info("semantic.system1.complete fields={} elapsedMs={}",
+                    request.questions().size(), elapsed(started));
+        } catch (RuntimeException ex) {
+            if (request.escalation() == null) throw ex;
+            LOG.warn("semantic.system1.unavailable elapsedMs={} type={}",
+                    elapsed(started), ex.getClass().getSimpleName());
+            // Represents the failed call, with zero answers. It cannot resolve a field.
+            bounded = new DecisionResponse("system-one-unavailable", "", "", Map.of());
+            systemOneUnavailable = true;
+        }
 
-        Set<String> fieldsToEscalate =
-                escalationFields(
-                        request,
-                        bounded
-                );
+        Set<String> fieldsToEscalate = escalationFields(request, bounded);
+        if (systemOneUnavailable) {
+            fieldsToEscalate = new LinkedHashSet<>(fieldsToEscalate);
+            fieldsToEscalate.addAll(request.questions().keySet());
+            fieldsToEscalate = Set.copyOf(fieldsToEscalate);
+        }
 
         if (fieldsToEscalate.isEmpty()) {
 
@@ -86,7 +104,7 @@ public final class SemanticDecisionService {
         }
 
         LlmDecisionEngine.Result llmResult =
-                llm.evaluate(
+                escalate(
                         new LlmDecisionEngine.Request(
                                 escalation.missionId(),
                                 escalation.operationId(),
@@ -94,23 +112,122 @@ public final class SemanticDecisionService {
                                 escalation.task(),
                                 request.state(),
                                 fieldsToEscalate,
-                                escalation.outputSchema(),
+                                scopedSchema(escalation.outputSchema(), fieldsToEscalate),
                                 escalation.maxOutputTokens(),
                                 escalation.temperature(),
                                 escalation.metadata()
                         )
                 );
 
+        Map<String, Object> structured = llmResult.output();
+        if (structured == null || !structured.keySet().containsAll(fieldsToEscalate)) {
+            throw new IllegalStateException("LLM omitted escalated semantic fields: " + fieldsToEscalate);
+        }
         return new Result(
                 bounded,
                 fieldsToEscalate,
-                llmResult.output(),
+                structured,
                 llmResult.routeKey(),
                 llmResult.response()
                         .provider(),
                 llmResult.response()
                         .model()
         );
+    }
+
+
+    /**
+     * Use System-1 only for closed-form questions. Invalid or unavailable answers
+     * return empty so callers can escalate the entire semantic operation.
+     * No synthetic answers are ever treated as successful evidence.
+     */
+    public Optional<DecisionResponse> tryBounded(
+            Map<String, Object> state,
+            Map<String, ? extends DecisionQuestion> questions,
+            double minimumConfidence,
+            String operation
+    ) {
+        Objects.requireNonNull(state, "state");
+        Objects.requireNonNull(questions, "questions");
+        if (questions.isEmpty()) return Optional.empty();
+        if (!Double.isFinite(minimumConfidence)
+                || minimumConfidence < 0.5d || minimumConfidence > 1.0d)
+            throw new IllegalArgumentException("Invalid System-1 confidence threshold");
+
+        long started = System.nanoTime();
+        try {
+            DecisionResponse response = systemOne.evaluate(state, questions);
+            for (var entry : questions.entrySet()) {
+                DecisionAnswer answer = response.answers().get(entry.getKey());
+                DecisionQuestion question = entry.getValue();
+                if (answer == null || !validAnswer(question, answer)
+                        || !Double.isFinite(confidence(answer))
+                        || confidence(answer) < minimumConfidence) {
+                    LOG.info("semantic.system1.unresolved operation={} field={} elapsedMs={}",
+                            operation, entry.getKey(), elapsed(started));
+                    return Optional.empty();
+                }
+            }
+            LOG.info("semantic.system1.resolved operation={} provider={} elapsedMs={}",
+                    operation, response.provider(), elapsed(started));
+            return Optional.of(response);
+        } catch (RuntimeException ex) {
+            LOG.warn("semantic.system1.failed operation={} elapsedMs={} type={}",
+                    operation, elapsed(started), ex.getClass().getSimpleName());
+            return Optional.empty();
+        }
+    }
+
+    public LlmDecisionEngine.Result escalate(LlmDecisionEngine.Request request) {
+        long started = System.nanoTime();
+        try {
+            LlmDecisionEngine.Result result = llm.evaluate(request);
+            LOG.info("semantic.llm.complete operation={} route={} elapsedMs={}",
+                    request.operationId(), result.routeKey(), elapsed(started));
+            return result;
+        } catch (RuntimeException e) {
+            LOG.warn("semantic.llm.failed operation={} elapsedMs={} type={}",
+                    request.operationId(), elapsed(started), e.getClass().getSimpleName());
+            throw e;
+        }
+    }
+
+    private static boolean validAnswer(DecisionQuestion question, DecisionAnswer answer) {
+        if (question instanceof com.sparrowx.agentic.systemone.SystemOneDecisionClient.NoulQuestion)
+            return answer instanceof NoulAnswer n && Double.isFinite(n.probability())
+                    && n.probability() >= 0 && n.probability() <= 1;
+        if (question instanceof com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceQuestion q)
+            return answer instanceof ChoiceAnswer a
+                    && q.options().containsKey(a.choice())
+                    && Double.isFinite(a.confidence())
+                    && a.confidence() >= 0 && a.confidence() <= 1;
+        if (question instanceof com.sparrowx.agentic.systemone.SystemOneDecisionClient.ScoreQuestion)
+            return answer instanceof ScoreAnswer a && Double.isFinite(a.score())
+                    && Double.isFinite(a.confidence()) && a.confidence() >= 0 && a.confidence() <= 1;
+        return false;
+    }
+
+    private static long elapsed(long since) {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - since);
+    }
+
+    /** Prevent required fields that System-1 already resolved from being regenerated. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> scopedSchema(Map<String, Object> schema, Set<String> fields) {
+        Object propertiesValue = schema.get("properties");
+        if (!(propertiesValue instanceof Map<?, ?> properties))
+            throw new IllegalArgumentException("Escalation schema has no object properties");
+        Map<String, Object> selected = new LinkedHashMap<>();
+        for (String field : fields) {
+            if (!properties.containsKey(field))
+                throw new IllegalArgumentException("Schema does not declare escalation field: " + field);
+            selected.put(field, properties.get(field));
+        }
+        Map<String, Object> result = new LinkedHashMap<>(schema);
+        result.put("properties", Map.copyOf(selected));
+        result.put("required", List.copyOf(selected.keySet()));
+        result.put("additionalProperties", false);
+        return Map.copyOf(result);
     }
 
     private static Set<String> escalationFields(
@@ -134,31 +251,32 @@ public final class SemanticDecisionService {
             /*
              * Missing bounded output cannot be silently treated as false.
              */
+            if (answer != null && validAnswer(request.questions().get(name), answer)) {
+                double confidence = confidence(answer);
+
+                if (confidence < request.minimumSystemOneConfidence()) {
+                    LOG.info(
+                            "semantic.system1.escalation field={} confidence={} threshold={}",
+                            name,
+                            confidence,
+                            request.minimumSystemOneConfidence()
+                    );
+                }
+            }
             if (answer == null) {
-                result.add(
-                        name
-                );
+                result.add(name);
 
                 continue;
             }
 
-            double confidence =
-                    confidence(
-                            answer
-                    );
+            if (!validAnswer(request.questions().get(name), answer)
+                    || !Double.isFinite(confidence(answer)) || confidence(answer) < request.minimumSystemOneConfidence()) {
 
-            if (confidence
-                    < request.minimumSystemOneConfidence()) {
-
-                result.add(
-                        name
-                );
+                result.add(name);
             }
         }
 
-        return Set.copyOf(
-                result
-        );
+        return Set.copyOf(result);
     }
 
     /**
