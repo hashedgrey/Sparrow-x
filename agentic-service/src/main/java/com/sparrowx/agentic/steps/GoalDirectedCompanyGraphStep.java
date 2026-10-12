@@ -1,383 +1,117 @@
 package com.sparrowx.agentic.steps;
 
+import buildingblocks.contracts.GraphQueryRequest;
 import com.sparrowx.agentic.components.GraphEvidenceGoalResolver;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.MissionContext;
+import com.sparrowx.agentic.planning.graph.GraphResolutionStatus;
 import com.sparrowx.agentic.planning.MissionIntent;
-import com.sparrowx.agentic.planning.GraphTraversal;
-import com.sparrowx.agentic.planning.GraphTraversal.*;
-import com.sparrowx.agentic.systemone.SystemOneDecisionClient;
-import com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceQuestion;
-import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder.ExpansionSpec;
-import com.sparrowx.internal.grpc.InternalGraph;
-import com.sparrowx.internal.grpc.InternalGraphNode;
+import com.sparrowx.agentic.planning.graph.GraphRootScope;
+import com.sparrowx.agentic.tools.internal.GraphEvidenceProjector;
+import com.sparrowx.agentic.tools.internal.InternalContextTool;
+import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder;
 import com.sparrowx.internal.grpc.InternalGraphNodeType;
-import com.sparrowx.internal.grpc.InternalGraphRelationship;
-import com.sparrowx.internal.grpc.InternalGraphRelationshipType;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
 
+/** Compiles one semantic query per root type and lets IntSvc evaluate each complete root set. */
 @Component
 public final class GoalDirectedCompanyGraphStep {
-
-    private final ResolveInternalContextStep internalStep;
     private final GraphEvidenceGoalResolver goalResolver;
-    private final SystemOneDecisionClient systemOne;
-    private final Limits limits;
+    private final InternalGraphRequestBuilder requests;
+    private final InternalContextTool tool;
 
-    public GoalDirectedCompanyGraphStep(
-            ResolveInternalContextStep internalStep,
-            GraphEvidenceGoalResolver goalResolver,
-            SystemOneDecisionClient systemOne,
-
-            @Value("${sparrowx.graph.max-hops:8}")
-            int maxHops,
-
-            @Value("${sparrowx.graph.max-steps:16}")
-            int maxSteps,
-
-            @Value("${sparrowx.graph.max-nodes:150}")
-            int maxNodes,
-
-            @Value("${sparrowx.graph.max-edges:300}")
-            int maxEdges,
-
-            @Value("${sparrowx.graph.max-expansions:32}")
-            int maxExpansions,
-
-            @Value("${sparrowx.graph.max-bindings:500}")
-            int maxBindings,
-
-            @Value("${sparrowx.graph.max-traversal-millis:30000}")
-            long maxTraversalMillis
-    ) {
-        this.internalStep = Objects.requireNonNull(internalStep);
+    public GoalDirectedCompanyGraphStep(GraphEvidenceGoalResolver goalResolver,
+            InternalGraphRequestBuilder requests, InternalContextTool tool) {
         this.goalResolver = Objects.requireNonNull(goalResolver);
-        this.systemOne = Objects.requireNonNull(systemOne);
-
-        this.limits = new Limits(
-                maxHops,
-                maxSteps,
-                maxNodes,
-                maxEdges,
-                maxExpansions,
-                maxBindings,
-                maxTraversalMillis
-        );
+        this.requests = Objects.requireNonNull(requests);
+        this.tool = Objects.requireNonNull(tool);
     }
 
-    public Result execute(
-            MissionContext context,
-            String requestId,
-            String rootEntityId,
-            InternalGraphNodeType rootNodeType,
-            MissionIntent intent,
-            String query
-    ) {
-        var seed = internalStep.readCompanyGraphRoot(
-                context,
-                requestId + ":root",
-                rootEntityId,
-                rootNodeType
-        );
-
-        InternalGraphNode rootProto =
-                seed.graph().getNodes(0);
-
-        Node root = node(rootProto);
-
-        var resolution = goalResolver.resolve(
-                context,
-                intent,
-                query,
-                root,
-                requestId + ":goal"
-        );
-
-        if (!resolution.ready()) {
-            return new Result(
-                    resolution.status(),
-                    List.of(),
-                    List.of(resolution.reason()),
-                    resolution.reason(),
-                    Map.of(
-                            "graphResolutionStatus",
-                            resolution.status().name(),
-                            "graphResolutionReason",
-                            resolution.reason()
-                    )
-            );
+    public record SelectedRoot(String entityId, InternalGraphNodeType nodeType) {
+        public SelectedRoot {
+            if (entityId == null || entityId.isBlank()) throw new IllegalArgumentException("Root ID required");
+            Objects.requireNonNull(nodeType);
         }
-
-        Map<String, InternalGraphNode> protoNodes =
-                new LinkedHashMap<>();
-
-        Map<String, InternalGraphRelationship> protoEdges =
-                new LinkedHashMap<>();
-
-        protoNodes.put(rootProto.getNodeId(), rootProto);
-
-        GraphTraversal traversal =
-                new GraphTraversal(limits);
-
-        GraphTraversal.Result traversed = traversal.execute(
-                resolution.goal(),
-                root,
-                (nodeId, relationship, edgeLimit, round) -> {
-                    InternalGraphRelationshipType relationshipType =
-                            InternalGraphRelationshipType.valueOf(
-                                    "INTERNAL_GRAPH_RELATIONSHIP_TYPE_"
-                                            + relationship
-                            );
-
-                    var expanded = internalStep.expandCompanyGraph(
-                            context,
-                            new ExpansionSpec(
-                                    requestId + ":expand:" + round,
-                                    Set.of(nodeId),
-                                    Set.of(relationshipType),
-                                    edgeLimit
-                            )
-                    );
-
-                    InternalGraph graph = expanded.graph();
-
-                    graph.getNodesList().forEach(value ->
-                            protoNodes.put(value.getNodeId(), value)
-                    );
-
-                    graph.getRelationshipsList().forEach(value ->
-                            protoEdges.put(
-                                    value.getRelationshipId(),
-                                    value
-                            )
-                    );
-
-                    return new Slice(
-                            graph.getNodesList()
-                                    .stream()
-                                    .map(GoalDirectedCompanyGraphStep::node)
-                                    .toList(),
-
-                            graph.getRelationshipsList()
-                                    .stream()
-                                    .map(GoalDirectedCompanyGraphStep::edge)
-                                    .toList(),
-
-                            expanded.truncated()
-                    );
-                },
-                (eligible, completedSteps, bindingCount) ->
-                        selectStep(
-                                query,
-                                eligible,
-                                completedSteps,
-                                bindingCount,
-                                protoNodes.values()
-                        )
-        );
-
-        Map<String, Object> attributes = new LinkedHashMap<>();
-
-        attributes.put(
-                "graphResolutionStatus",
-                traversed.status().name()
-        );
-
-        attributes.put(
-                "graphResolutionReason",
-                traversed.reason()
-        );
-
-        attributes.put(
-                "expansionCount",
-                traversed.expansions()
-        );
-
-        attributes.put(
-                "actualHops",
-                traversed.hops()
-        );
-
-        attributes.put(
-                "requestedGraphOutputs",
-                resolution.goal().outputs()
-                        .stream()
-                        .map(output -> Map.of(
-                                "variable", output.variable(),
-                                "field", output.field()
-                        ))
-                        .toList()
-        );
-
-        attributes.put(
-                "validatedGraphAnswerRows",
-                traversed.answers()
-        );
-
-        if (traversed.status() != Status.COMPLETE) {
-            return new Result(
-                    traversed.status(),
-                    List.of(),
-                    List.of(traversed.reason()),
-                    traversed.reason(),
-                    Map.copyOf(attributes)
-            );
-        }
-
-        /*
-         * Preserve original protobuf node attributes and relationship
-         * metadata, but include only the proofs supporting final bindings.
-         */
-        InternalGraph.Builder merged = seed.graph()
-                .toBuilder()
-                .clearNodes()
-                .clearRelationships()
-                .setGraphId(requestId + ":resolved");
-
-        for (Node selected : traversed.nodes()) {
-            merged.addNodes(
-                    Objects.requireNonNull(
-                            protoNodes.get(selected.id())
-                    )
-            );
-        }
-
-        for (Edge selected : traversed.edges()) {
-            merged.addRelationships(
-                    Objects.requireNonNull(
-                            protoEdges.get(selected.id())
-                    )
-            );
-        }
-
-        var evidence = internalStep.mapMergedCompanyGraph(
-                context,
-                requestId + ":merged",
-                merged.build()
-        );
-
-        attributes.put(
-                "serializedSizeBytes",
-                evidence.graph().getSerializedSize()
-        );
-
-        return new Result(
-                Status.COMPLETE,
-                evidence.evidenceRefs(),
-                List.of(),
-                traversed.reason(),
-                Map.copyOf(attributes)
-        );
     }
-
-    private Step selectStep(
-            String query,
-            List<Step> eligible,
-            int completedSteps,
-            int bindingCount,
-            Collection<InternalGraphNode> collectedNodes
-    ) {
-        Map<String, String> options = new LinkedHashMap<>();
-
-        for (int i = 0; i < eligible.size(); i++) {
-            options.put(
-                    "step_" + i,
-                    eligible.get(i).toString()
-            );
+    public record Prepared(Map<String, InternalGraphNodeType> selectedRoots,
+            Map<InternalGraphNodeType, GraphEvidenceGoalResolver.Resolution> compiledGoals, String query) {
+        public Prepared {
+            selectedRoots = Map.copyOf(selectedRoots);
+            compiledGoals = Map.copyOf(compiledGoals);
+            if (selectedRoots.isEmpty() || compiledGoals.isEmpty())
+                throw new IllegalArgumentException("Empty graph query plan");
         }
-
-        List<Map<String, Object>> evidence =
-                collectedNodes.stream()
-                        .map(value -> Map.<String, Object>of(
-                                "nodeId", value.getNodeId(),
-                                "nodeType", value.getNodeType().name(),
-                                "label", value.getLabel(),
-                                "attributes", value.getAttributesMap()
-                        ))
-                        .toList();
-
-        var decision = systemOne.evaluate(
-                Map.of(
-                        "query", query,
-                        "completedSteps", completedSteps,
-                        "bindingCount", bindingCount,
-                        "collectedNodes", evidence
-                ),
-                Map.of(
-                        "next",
-                        new ChoiceQuestion(
-                                """
-                                Choose the next eligible graph requirement
-                                most likely to reduce remaining work.
-
-                                Every option is a mandatory requirement.
-                                Prefer selective filters when useful.
-                                Do not declare completion or invent steps.
-                                """,
-                                options
-                        )
-                )
-        );
-
-        String selected = decision.choiceValue("next");
-
-        if (!options.containsKey(selected)) {
-            throw new IllegalStateException(
-                    "System-1 selected an unknown graph step"
-            );
-        }
-
-        int index = Integer.parseInt(
-                selected.substring("step_".length())
-        );
-
-        return eligible.get(index);
     }
-
-    private static Node node(
-            InternalGraphNode node
-    ) {
-        return new Node(
-                node.getNodeId(),
-                node.getNodeType().name().substring(
-                        "INTERNAL_GRAPH_NODE_TYPE_".length()
-                ),
-                node.getEntityId(),
-                node.getLabel(),
-                node.getSummary(),
-                node.getAttributesMap()
-        );
-    }
-
-    private static Edge edge(
-            InternalGraphRelationship edge
-    ) {
-        return new Edge(
-                edge.getRelationshipId(),
-                edge.getFromNodeId(),
-                edge.getToNodeId(),
-                edge.getRelationshipType().name().substring(
-                        "INTERNAL_GRAPH_RELATIONSHIP_TYPE_".length()
-                )
-        );
-    }
-
-    public record Result(
-            Status status,
-            List<EvidenceRef> evidenceRefs,
-            List<String> warnings,
-            String summary,
-            Map<String, Object> attributes
-    ) {
+    public record Result(GraphResolutionStatus status, List<EvidenceRef> evidenceRefs, List<String> warnings,
+            String summary, Map<String, Object> attributes) {
         public Result {
-            Objects.requireNonNull(status);
             evidenceRefs = List.copyOf(evidenceRefs);
             warnings = List.copyOf(warnings);
-            summary = Objects.requireNonNull(summary);
             attributes = Map.copyOf(attributes);
         }
+    }
+
+    public Prepared prepare(MissionContext context, String requestId, List<SelectedRoot> roots,
+            MissionIntent intent, String query) {
+        Objects.requireNonNull(context); Objects.requireNonNull(roots); Objects.requireNonNull(intent);
+        if (requestId == null || requestId.isBlank() || query == null || query.isBlank() || roots.isEmpty())
+            throw new IllegalArgumentException("Batch ID, question and roots are required");
+        Map<String, InternalGraphNodeType> selected = new LinkedHashMap<>();
+        Map<InternalGraphNodeType, Set<String>> groups = new LinkedHashMap<>();
+        for (SelectedRoot root : roots) {
+            if (selected.putIfAbsent(root.entityId(), root.nodeType()) != null)
+                throw new IllegalArgumentException("Duplicate root ID");
+            groups.computeIfAbsent(root.nodeType(), unused -> new LinkedHashSet<>()).add(root.entityId());
+        }
+        Map<InternalGraphNodeType, GraphEvidenceGoalResolver.Resolution> compiled = new LinkedHashMap<>();
+        groups.forEach((type, ids) -> compiled.put(type,
+                goalResolver.compile(context, intent, query,
+                        new GraphRootScope(nodeTypeName(type), ids), requestId + ":goal:" + type.name())));
+        return new Prepared(selected, compiled, query);
+    }
+
+    public Result executeBatch(MissionContext context, String requestId, Prepared prepared,
+            InternalGraphNodeType type) {
+        Objects.requireNonNull(prepared);
+        var resolution = Objects.requireNonNull(prepared.compiledGoals().get(type), "Unknown root type");
+        if (!resolution.ready()) return failed(resolution.status(), resolution.reason());
+        GraphQueryRequest query = resolution.query();
+        Set<String> selected = new HashSet<>();
+        prepared.selectedRoots().forEach((id, nodeType) -> {
+            if (nodeType == type) selected.add(id);
+        });
+        if (!query.rootType().equals(nodeTypeName(type)) || !query.rootIds().equals(selected))
+            throw new IllegalArgumentException("Compiled query does not match the resolved root set");
+        try {
+            var response = tool.executeCompanyGraphQuery(context,
+                    requests.buildCompanyGraphQuery(context, requestId, query));
+            if (response.getTruncated() || !Set.copyOf(response.getEvaluatedRootEntityIdsList()).equals(selected))
+                return failed(GraphResolutionStatus.INSUFFICIENT, "Graph query did not exhaust the resolved root set");
+            var rows = GraphEvidenceProjector.project(response);
+            var refs = GraphEvidenceProjector.evidence(response, requestId, selected);
+            return new Result(GraphResolutionStatus.COMPLETE, refs, List.of(),
+                    rows.isEmpty() ? "Exhaustive graph query found no matching rows"
+                            : "Resolved " + selected.size() + " graph roots",
+                    Map.of("graphResolutionStatus", GraphResolutionStatus.COMPLETE.name(),
+                            "validatedGraphAnswerRows", rows, "evaluatedRoots", selected.size(),
+                            "matchingRowCount", rows.size()));
+        } catch (RuntimeException e) {
+            return failed(GraphResolutionStatus.INSUFFICIENT, "IntSvc graph query failed: " + e.getClass().getSimpleName());
+        }
+    }
+
+    private static Result failed(GraphResolutionStatus status, String reason) {
+        return new Result(status, List.of(), List.of(reason), reason,
+                Map.of("graphResolutionStatus", status.name(), "graphResolutionReason", reason));
+    }
+    private static String nodeTypeName(InternalGraphNodeType type) {
+        String prefix = "INTERNAL_GRAPH_NODE_TYPE_";
+        if (type == null || type == InternalGraphNodeType.UNRECOGNIZED
+                || type == InternalGraphNodeType.INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED
+                || !type.name().startsWith(prefix))
+            throw new IllegalArgumentException("Invalid graph root node type");
+        return type.name().substring(prefix.length());
     }
 }

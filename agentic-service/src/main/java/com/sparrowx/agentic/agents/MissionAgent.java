@@ -21,17 +21,17 @@ import com.sparrowx.agentic.mission.artifact.PreparedArtifact;
 import com.sparrowx.agentic.mission.evidence.Citation;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.model.MissionResult;
-import com.sparrowx.agentic.planning.GraphTraversal;
 import com.sparrowx.agentic.planning.MissionIntent;
 import com.sparrowx.agentic.planning.InternalRootSelection;
 import com.sparrowx.agentic.planning.InternalRootSelection.*;
+import com.sparrowx.agentic.planning.graph.GraphResolutionStatus;
+import com.sparrowx.internal.grpc.InternalGraphNodeType;
 import org.springframework.beans.factory.annotation.Value;
 import com.sparrowx.agentic.steps.BuildDocumentEvidenceStep;
 import com.sparrowx.agentic.steps.GoalDirectedCompanyGraphStep;
 import com.sparrowx.agentic.steps.ResolveInternalContextStep;
 import com.sparrowx.agentic.tools.document.DocumentEvidenceRequestBuilder.BuildSpec;
 import com.sparrowx.agentic.tools.document.DocumentSpanSearchRequestBuilder.Scope;
-import com.sparrowx.agentic.planning.GraphTraversal.Status;
 import com.sparrowx.document.proto.DocumentEvidenceGraphProto;
 import com.sparrowx.document.proto.EvidenceGoalProto;
 import com.sparrowx.document.proto.RetrievalModeProto;
@@ -49,16 +49,13 @@ import java.util.Set;
 
 /**
  * SparrowX mission agent.
- *
  * Execution model:
- *
  * frozen MissionRunInput
  *      -> Embabel GOAP or HYBRID planning
  *      -> evidence-producing actions
  *      -> System-1 utility reassessment after each evidence action
  *      -> grounded terminal synthesis
  *      -> MissionResult
- *
  * MissionIntent is resolved before this process starts.
  * This agent never reclassifies the mission intent.
  */
@@ -74,7 +71,6 @@ public final class MissionAgent {
     private static final String DOCUMENT_BUILD = "document.evidence.build";
     private static final String INTERNAL_SEARCH = "internal.entities.search";
     private static final String COMPANY_GRAPH = "internal.company-graph.read";
-    private static final String LEARNING_GRAPH = "internal.learning-graph.read";
 
     private final SystemOneUtilityComponent utilityComponent;
     private final BuildDocumentEvidenceStep documentStep;
@@ -495,8 +491,7 @@ public final class MissionAgent {
      */
 
     @Action(
-            description =
-                    "Resolve required company graph relationships and output fields",
+            description = "Resolve required company graph relationships and output fields",
             readOnly = true,
             cost = 0.15,
             valueMethod = "companyGraphValue"
@@ -511,55 +506,92 @@ public final class MissionAgent {
         Objects.requireNonNull(context, "context");
 
         if (!capabilityAllowed(input, COMPANY_GRAPH)) {
-            return CompanyGraphState.skipped("Company graph is not allowed", searchState.utility());
+            return CompanyGraphState.skipped(
+                    "Company graph is not allowed", searchState.utility());
         }
+
         Selection selection = searchState.selection();
         if (!selection.ready()) {
-            return CompanyGraphState.skipped("Unresolved root set: " + selection.explanation(),
+            return CompanyGraphState.skipped(
+                    "Unresolved root set: " + selection.explanation(),
                     searchState.utility());
         }
+
         List<Candidate> candidates = selection.selected();
         if (candidates.isEmpty()) {
-            return CompanyGraphState.skipped("Exhaustive search returned no matching roots",
+            return CompanyGraphState.skipped(
+                    "Exhaustive search returned no matching roots",
                     searchState.utility());
         }
         if (candidates.size() > maxGraphRoots) {
-            return CompanyGraphState.skipped("Graph root count exceeds configured limit",
+            return CompanyGraphState.skipped(
+                    "Graph root count exceeds configured limit",
                     searchState.utility());
         }
 
         long deadline = System.nanoTime() + maxGraphBatchMillis * 1_000_000L;
+        GoalDirectedCompanyGraphStep.Prepared prepared = graphTraversalStep.prepare(
+                input.request().context(),
+                effectId(input, "company-graph") + ":batch",
+                candidates.stream()
+                        .map(candidate -> new GoalDirectedCompanyGraphStep.SelectedRoot(
+                                candidate.entityId(), candidate.nodeType()))
+                        .toList(),
+                input.intent(),
+                selection.plan().perRootGraphQuestion()
+        );
+
         List<RootGraphOutcome> outcomes = new ArrayList<>();
         List<EvidenceRef> allRefs = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
         List<Map<String, Object>> verifiedRows = new ArrayList<>();
-        Status overall = Status.COMPLETE;
+        GraphResolutionStatus overall = GraphResolutionStatus.COMPLETE;
 
-        for (int i = 0; i < candidates.size(); i++) {
+        Map<InternalGraphNodeType, List<Candidate>> groups = new LinkedHashMap<>();
+        candidates.forEach(candidate -> groups.computeIfAbsent(
+                candidate.nodeType(), ignored -> new ArrayList<>()).add(candidate));
+
+        int batch = 0;
+        for (var group : groups.entrySet()) {
             if (System.nanoTime() >= deadline) {
-                overall = Status.INSUFFICIENT;
-                warnings.add("Graph batch exceeded its global time budget; no partial answer is complete");
+                overall = GraphResolutionStatus.INSUFFICIENT;
+                warnings.add("Graph batch exceeded its global time budget");
                 break;
             }
-            Candidate candidate = candidates.get(i);
-            var result = graphTraversalStep.execute(
+
+            var result = graphTraversalStep.executeBatch(
                     input.request().context(),
-                    effectId(input, "company-graph") + ":root:" + i,
-                    candidate.entityId(), candidate.nodeType(), input.intent(),
-                    selection.plan().perRootGraphQuestion()
+                    effectId(input, "company-graph") + ":batch:" + batch++,
+                    prepared,
+                    group.getKey()
             );
-            outcomes.add(new RootGraphOutcome(candidate, result.status(), result.evidenceRefs(),
-                    result.summary(), result.attributes()));
             warnings.addAll(result.warnings());
-            if (result.status() != Status.COMPLETE) {
-                overall = result.status();
-                warnings.add("Root '" + candidate.label() + "' failed: " + result.summary());
-                break; // Never advertise an incomplete batch as a complete answer.
+
+            boolean timedOut = System.nanoTime() >= deadline;
+            if (timedOut || result.status() != GraphResolutionStatus.COMPLETE) {
+                overall = timedOut ? GraphResolutionStatus.INSUFFICIENT : result.status();
+                warnings.add(timedOut
+                        ? "Graph batch exceeded its global time budget"
+                        : "Graph query failed for root type " + group.getKey());
+                break;
             }
-            allRefs.addAll(result.evidenceRefs());
+
             Object rows = result.attributes().get("validatedGraphAnswerRows");
-            if (rows instanceof List<?> verified) {
-                for (Object row : verified) {
+            if (!(rows instanceof List<?> verified)) {
+                overall = GraphResolutionStatus.INSUFFICIENT;
+                warnings.add("Graph query returned no validated row collection");
+                break;
+            }
+
+            allRefs.addAll(result.evidenceRefs());
+            for (Candidate candidate : group.getValue()) {
+                List<?> forRoot = verified.stream()
+                        .filter(Map.class::isInstance)
+                        .filter(row -> candidate.entityId().equals(
+                                ((Map<?, ?>) row).get("rootEntityId")))
+                        .toList();
+
+                for (Object row : forRoot) {
                     verifiedRows.add(Map.of(
                             "rootEntityId", candidate.entityId(),
                             "rootNodeType", candidate.nodeType().name(),
@@ -567,31 +599,43 @@ public final class MissionAgent {
                             "verifiedAnswer", row
                     ));
                 }
+                outcomes.add(new RootGraphOutcome(
+                        candidate, GraphResolutionStatus.COMPLETE, result.evidenceRefs(),
+                        result.summary(), result.attributes()));
             }
         }
 
-        if (outcomes.size() != candidates.size() && overall == Status.COMPLETE) {
-            overall = Status.INSUFFICIENT;
+        if (outcomes.size() != candidates.size() && overall == GraphResolutionStatus.COMPLETE) {
+            overall = GraphResolutionStatus.INSUFFICIENT;
             warnings.add("Not all required roots were processed");
         }
+
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("graphResolutionStatus", overall.name());
         attributes.put("rootSelectionMode", selection.plan().mode().name());
         attributes.put("requestedRoots", candidates.size());
+        attributes.put("compiledGraphGoals", prepared.compiledGoals().size());
         attributes.put("processedRoots", outcomes.size());
-        attributes.put("validatedGraphAnswerRows", List.copyOf(verifiedRows));
-        String summary = overall == Status.COMPLETE
+        attributes.put("validatedGraphAnswerRows", overall == GraphResolutionStatus.COMPLETE
+                ? List.copyOf(verifiedRows) : List.of());
+
+        String summary = overall == GraphResolutionStatus.COMPLETE
                 ? "Resolved all " + candidates.size() + " graph roots"
-                : "Company graph requirements incomplete: " + String.join("; ", warnings);
-        List<EvidenceRef> evidenceRefs = overall == Status.COMPLETE
+                : "Company graph requirements incomplete: "
+                + String.join("; ", warnings);
+        List<EvidenceRef> evidenceRefs = overall == GraphResolutionStatus.COMPLETE
                 ? allRefs.stream().distinct().toList() : List.of();
         Map<String, Object> debug = Map.copyOf(attributes);
-        UtilityAssessment utility = overall == Status.COMPLETE
-                ? reassess(input, context, COMPANY_GRAPH, summary, debug, evidenceRefs, "", "")
+        UtilityAssessment utility = overall == GraphResolutionStatus.COMPLETE
+                ? reassess(input, context, COMPANY_GRAPH, summary, debug,
+                evidenceRefs, "", "")
                 : searchState.utility();
+
         return new CompanyGraphState(
                 true, overall, evidenceRefs, warnings.stream().distinct().toList(),
-                summary, debug, List.copyOf(outcomes), utility
+                summary, debug,
+                overall == GraphResolutionStatus.COMPLETE ? List.copyOf(outcomes) : List.of(),
+                utility
         );
     }
 
@@ -629,13 +673,6 @@ public final class MissionAgent {
                 ? 0.60d
                 : clamp(latest.companyGraphUtility());
     }
-
-    /*
-     * ------------------------------------------------------------------
-     * LEARNING GRAPH
-     * ------------------------------------------------------------------
-     */
-
 
 
 
@@ -903,7 +940,7 @@ public final class MissionAgent {
                         : blackboard.last(CompanyGraphState.class);
 
         if (graphState != null
-                && graphState.resolutionStatus() != GraphTraversal.Status.COMPLETE) {
+                && graphState.resolutionStatus() != GraphResolutionStatus.COMPLETE) {
             /*
              * complete() will return the deterministic unresolved result.
              * A low synthesis utility must not leave the mission stuck.
@@ -996,7 +1033,7 @@ public final class MissionAgent {
 
     public record RootGraphOutcome(
             Candidate root,
-            Status status,
+            GraphResolutionStatus status,
             List<EvidenceRef> evidenceRefs,
             String summary,
             Map<String, Object> attributes
@@ -1012,7 +1049,7 @@ public final class MissionAgent {
 
     public record CompanyGraphState(
             boolean performed,
-            Status resolutionStatus,
+            GraphResolutionStatus resolutionStatus,
             List<EvidenceRef> evidenceRefs,
             List<String> warnings,
             String summary,
@@ -1054,14 +1091,14 @@ public final class MissionAgent {
         ) {
             return new CompanyGraphState(
                     false,
-                    GraphTraversal.Status.INSUFFICIENT,
+                    GraphResolutionStatus.INSUFFICIENT,
                     List.of(),
                     List.of(summary),
                     summary,
                     Map.of(
                             "skipped", true,
                             "graphResolutionStatus",
-                            GraphTraversal.Status.INSUFFICIENT.name()
+                            GraphResolutionStatus.INSUFFICIENT.name()
                     ),
                     List.of(),
                     utility
@@ -1121,7 +1158,9 @@ public final class MissionAgent {
                         input.intent().requiresInternalContext(),
                         input.intent().requiresCitations(),
                         input.intent().requiresVerification()
-                )
+                ),
+                input.missionId(),
+                effectId(input, "utility-" + latestAction)
         );
     }
 
@@ -1255,7 +1294,7 @@ public final class MissionAgent {
                 && (internalState == null
                 || !internalState.selection().ready()
                 || (internalState.evidenceRefs().isEmpty()
-                    && !internalState.selection().selected().isEmpty()))) {
+                && !internalState.selection().selected().isEmpty()))) {
             missing.add(internalState == null ? "internal context" :
                     "internal root selection: " + internalState.selection().explanation());
         }
@@ -1270,7 +1309,7 @@ public final class MissionAgent {
         }
 
         if (companyGraphState != null) {
-            if (companyGraphState.resolutionStatus() != Status.COMPLETE) {
+            if (companyGraphState.resolutionStatus() != GraphResolutionStatus.COMPLETE) {
                 missing.add(
                         "company graph requirements ["
                                 + companyGraphState.resolutionStatus().name()
