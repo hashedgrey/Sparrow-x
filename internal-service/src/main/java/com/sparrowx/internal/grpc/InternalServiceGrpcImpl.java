@@ -4,6 +4,9 @@ import buildingblocks.core.commands.CommandBus;
 import buildingblocks.core.queries.QueryBus;
 import com.sparrowx.internal.exceptions.InternalServiceException;
 import com.sparrowx.internal.mappers.*;
+import com.sparrowx.internal.data.neo4j.graph.Neo4jGraphQueryClient;
+import com.sparrowx.internal.grpc.graph.AuthenticatedGraphCaller;
+import com.sparrowx.internal.grpc.graph.GraphQueryGrpcMapper;
 import io.grpc.stub.StreamObserver;
 import org.springframework.grpc.server.service.GrpcService;
 import org.slf4j.Logger;
@@ -17,13 +20,32 @@ public class InternalServiceGrpcImpl extends InternalServiceGrpc.InternalService
 
     private final CommandBus commandBus;
     private final QueryBus queryBus;
+    private final Neo4jGraphQueryClient graphQueries;
+    private final AuthenticatedGraphCaller graphCaller;
 
     public InternalServiceGrpcImpl(
             CommandBus commandBus,
-            QueryBus queryBus
+            QueryBus queryBus,
+            Neo4jGraphQueryClient graphQueries,
+            AuthenticatedGraphCaller graphCaller
     ) {
         this.commandBus = commandBus;
         this.queryBus = queryBus;
+        this.graphQueries = graphQueries;
+        this.graphCaller = graphCaller;
+    }
+
+    @Override
+    public void executeInternalCompanyGraphQuery(
+            ExecuteInternalCompanyGraphQueryRequest request,
+            StreamObserver<ExecuteInternalCompanyGraphQueryResponse> responseObserver
+    ) {
+        // verify() must compare the declared context with the authenticated RPC principal.
+        var actor = graphCaller.verify(request.getContext());
+        var query = GraphQueryGrpcMapper.toQuery(request);
+        var result = graphQueries.execute(actor.tenantId(), actor.actorId(), query);
+        responseObserver.onNext(GraphQueryGrpcMapper.toResponse(result));
+        responseObserver.onCompleted();
     }
 
     @Override
