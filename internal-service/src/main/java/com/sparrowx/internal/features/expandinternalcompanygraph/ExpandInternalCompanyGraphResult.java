@@ -9,9 +9,6 @@ public record ExpandInternalCompanyGraphResult(
         boolean truncated
 ) {
     public ExpandInternalCompanyGraphResult {
-        Objects.requireNonNull(
-                graph,
-                "graph is required"
-        );
+        Objects.requireNonNull(graph, "graph is required");
     }
 }

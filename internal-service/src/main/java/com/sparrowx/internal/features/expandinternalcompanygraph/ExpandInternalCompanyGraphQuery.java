@@ -19,48 +19,27 @@ public record ExpandInternalCompanyGraphQuery(
         requireText(actorId, "actorId");
         requireText(requestId, "requestId");
 
-        frontierNodeIds = requiredSet(
-                frontierNodeIds,
-                "frontierNodeIds"
-        );
-
-        relationshipTypes = requiredSet(
-                relationshipTypes,
-                "relationshipTypes"
-        );
+        frontierNodeIds = requiredSet(frontierNodeIds, "frontierNodeIds");
+        relationshipTypes = requiredSet(relationshipTypes, "relationshipTypes");
 
         if (limit < 1) {
-            throw new InternalValidationException(
-                    "limit must be positive"
-            );
+            throw new InternalValidationException("limit must be positive");
         }
     }
 
-    private static void requireText(
-            String value,
-            String fieldName
-    ) {
+    private static void requireText(String value, String fieldName) {
         if (value == null || value.isBlank()) {
-            throw new InternalValidationException(
-                    fieldName + " is required"
-            );
+            throw new InternalValidationException(fieldName + " is required");
         }
     }
 
-    private static Set<String> requiredSet(
-            Set<String> values,
-            String fieldName
-    ) {
+    private static Set<String> requiredSet(Set<String> values, String fieldName) {
         if (values == null || values.isEmpty()) {
-            throw new InternalValidationException(
-                    fieldName + " must not be empty"
-            );
+            throw new InternalValidationException(fieldName + " must not be empty");
         }
-
         for (String value : values) {
             requireText(value, fieldName + " entry");
         }
-
         return Set.copyOf(values);
     }
 }
