@@ -2,27 +2,28 @@
 
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
 
-    <property name="LOG_PATTERN"
-              value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} otel_trace_id=%X{otel_trace_id:-} otel_span_id=%X{otel_span_id:-} request_id=%X{request_id:-} business_trace_id=%X{business_trace_id:-} tenant_id=%X{tenant_id:-} document_id=%X{document_id:-} ingestion_job_id=%X{ingestion_job_id:-} - %msg%n"/>
-
-    <!-- Console logs -->
+    <!-- Colored IntelliJ console -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>${LOG_PATTERN}</pattern>
+            <pattern>
+                %clr(%d{yyyy-MM-dd HH:mm:ss}){faint} %clr([%thread]){faint} %clr(%-5level) %clr(%logger{36}){cyan} %clr(trace=%X{trace_id} span=%X{span_id}){magenta} - %msg%n
+            </pattern>
         </encoder>
     </appender>
 
-    <!-- File logs -->
+    <!-- Plain logs for files -->
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>logs/document-service.log</file>
 
         <encoder>
-            <pattern>${LOG_PATTERN}</pattern>
+            <pattern>
+                %d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} trace=%X{trace_id} span=%X{span_id} - %msg%n
+            </pattern>
         </encoder>
 
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
             <fileNamePattern>logs/document-service.%d{yyyy-MM-dd}.log</fileNamePattern>
-            <maxHistory>7</maxHistory>
+            <maxHistory>2</maxHistory>
         </rollingPolicy>
     </appender>
 
