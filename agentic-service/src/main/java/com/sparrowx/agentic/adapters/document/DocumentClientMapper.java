@@ -10,8 +10,6 @@ public final class DocumentClientMapper {
 
     private static final String AGENTIC_SERVICE = "agentic-service";
 
-    private static final Metadata.Key<String> INTERNAL_CALL_HEADER =
-            Metadata.Key.of("x-internal-call", Metadata.ASCII_STRING_MARSHALLER);
 
     private static final Metadata.Key<String> USER_ID_HEADER =
             Metadata.Key.of("x-user-id", Metadata.ASCII_STRING_MARSHALLER);
@@ -19,8 +17,6 @@ public final class DocumentClientMapper {
     private static final Metadata.Key<String> TENANT_ID_HEADER =
             Metadata.Key.of("x-tenant-id", Metadata.ASCII_STRING_MARSHALLER);
 
-    private static final Metadata.Key<String> ROLES_HEADER =
-            Metadata.Key.of("x-roles", Metadata.ASCII_STRING_MARSHALLER);
     private static final Metadata.Key<String> REQUEST_ID_HEADER =
             Metadata.Key.of("x-sparrowx-request-id", Metadata.ASCII_STRING_MARSHALLER);
 
@@ -48,7 +44,7 @@ public final class DocumentClientMapper {
                 .setProjectId(context.projectId())
                 .setTeamId(context.teamId())
                 .setTraceId(context.traceId())
-                .setCallerService(callerService(context))
+                .setCallerService(AGENTIC_SERVICE)
                 .build();
     }
 
@@ -62,13 +58,13 @@ public final class DocumentClientMapper {
         requireTenant(context.tenantId());
         requestId = requireText(requestId, "requestId");
 
+        // Do not fabricate roles or an internal authorization decision.
+        // DocSvc must authenticate the caller through its trusted transport/interceptor.
         Metadata metadata = new Metadata();
 
-        metadata.put(INTERNAL_CALL_HEADER, "true");
         metadata.put(TENANT_ID_HEADER, context.tenantId());
 
         putIfPresent(metadata, USER_ID_HEADER, context.userId());
-        metadata.put(ROLES_HEADER, "USER");
 
         putIfPresent(metadata, REQUEST_ID_HEADER, requestId);
         putIfPresent(metadata, PROJECT_ID_HEADER, context.projectId());
@@ -93,18 +89,15 @@ public final class DocumentClientMapper {
 
 
 
-    private static String callerService(MissionContext context) {
-        return  AGENTIC_SERVICE;
-    }
 
     private static void requireTenant(String tenantId) {
-        if (tenantId.isBlank()) {
+        if (tenantId == null || tenantId.isBlank()) {
             throw new IllegalArgumentException("tenantId must not be blank");
         }
     }
 
     private static void putIfPresent(Metadata metadata, Metadata.Key<String> key, String value) {
-        if (!value.isBlank()) {
+        if (value != null && !value.isBlank()) {
             metadata.put(key, value);
         }
     }

@@ -68,6 +68,26 @@ public final class DocumentSpanSearchRequestBuilder {
             collectionIds = collectionIds == null ? List.of() : List.copyOf(collectionIds);
             tags = tags == null ? List.of() : List.copyOf(tags);
             metadataFilters = metadataFilters == null ? Map.of() : Map.copyOf(metadataFilters);
+            requireNonBlankValues(documentIds, "documentIds");
+            requireNonBlankValues(fileNames, "fileNames");
+            requireNonBlankValues(collectionIds, "collectionIds");
+            requireNonBlankValues(tags, "tags");
+            metadataFilters.forEach((key, value) -> {
+                requireText(key, "metadata filter key");
+                requireText(value, "metadata filter value");
+            });
+        }
+
+        public boolean hasConstraints() {
+            return !documentIds.isEmpty() || !fileNames.isEmpty()
+                    || !collectionIds.isEmpty() || !tags.isEmpty()
+                    || !metadataFilters.isEmpty();
+        }
+
+        private static void requireNonBlankValues(List<String> values, String field) {
+            for (String value : values) {
+                requireText(value, field + " entry");
+            }
         }
 
         public DocumentScopeProto toProto() {

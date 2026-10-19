@@ -21,8 +21,18 @@ public final class DocumentTool {
         this.client = Objects.requireNonNull(client, "client must not be null");
     }
 
+    /**
+     * Retrieves document METADATA only. The supplied GetDocumentResponse has
+     * a DocumentProto descriptor and no content/body field. Do not use this
+     * call as evidence that full document contents were retrieved.
+     */
     public GetDocumentResponse getDocument(MissionContext context, GetDocumentRequest request) {
         return client.getDocument(context, request);
+    }
+
+    /** Explicitly named metadata alias; existing getDocument callers remain compatible. */
+    public GetDocumentResponse getDocumentMetadata(MissionContext context, GetDocumentRequest request) {
+        return getDocument(context, request);
     }
 
     public SearchDocumentSpansResponse searchSpans(

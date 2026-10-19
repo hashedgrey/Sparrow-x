@@ -45,17 +45,17 @@ public final class DocumentGrpcClient {
             UploadDocumentRequest request) {
         UploadDocumentRequest effectiveRequest = Objects.requireNonNull(request, "request must not be null")
                 .toBuilder()
-                .setContext(mapper.toRequestContext(context))
+                .setContext(mapper.toRequestContext(context, operationRequestId(context, request.getContext().getRequestId())))
                 .build();
-        return invoke(context, Operation.UPLOAD_DOCUMENT, stub -> stub.uploadDocument(effectiveRequest));
+        return invoke(context, effectiveRequest.getContext().getRequestId(), Operation.UPLOAD_DOCUMENT, stub -> stub.uploadDocument(effectiveRequest));
     }
 
     public GetDocumentResponse getDocument(MissionContext context, GetDocumentRequest request) {
         GetDocumentRequest effectiveRequest = Objects.requireNonNull(request, "request must not be null")
                 .toBuilder()
-                .setContext(mapper.toRequestContext(context))
+                .setContext(mapper.toRequestContext(context, operationRequestId(context, request.getContext().getRequestId())))
                 .build();
-        return invoke(context, Operation.GET_DOCUMENT, stub -> stub.getDocument(effectiveRequest));
+        return invoke(context, effectiveRequest.getContext().getRequestId(), Operation.GET_DOCUMENT, stub -> stub.getDocument(effectiveRequest));
     }
 
     public GetIngestionJobResponse getIngestionJob(
@@ -63,9 +63,9 @@ public final class DocumentGrpcClient {
             GetIngestionJobRequest request) {
         GetIngestionJobRequest effectiveRequest = Objects.requireNonNull(request, "request must not be null")
                 .toBuilder()
-                .setContext(mapper.toRequestContext(context))
+                .setContext(mapper.toRequestContext(context, operationRequestId(context, request.getContext().getRequestId())))
                 .build();
-        return invoke(context, Operation.GET_INGESTION_JOB, stub -> stub.getIngestionJob(effectiveRequest));
+        return invoke(context, effectiveRequest.getContext().getRequestId(), Operation.GET_INGESTION_JOB, stub -> stub.getIngestionJob(effectiveRequest));
     }
 
     public SearchDocumentSpansResponse searchDocumentSpans(
@@ -73,10 +73,11 @@ public final class DocumentGrpcClient {
             SearchDocumentSpansRequest request) {
         SearchDocumentSpansRequest effectiveRequest = Objects.requireNonNull(request, "request must not be null")
                 .toBuilder()
-                .setContext(mapper.toRequestContext(context))
+                .setContext(mapper.toRequestContext(context, operationRequestId(context, request.getContext().getRequestId())))
                 .build();
         return invoke(
                 context,
+                effectiveRequest.getContext().getRequestId(),
                 Operation.SEARCH_DOCUMENT_SPANS,
                 stub -> stub.searchDocumentSpans(effectiveRequest));
     }
@@ -86,10 +87,11 @@ public final class DocumentGrpcClient {
             BuildDocumentEvidenceRequest request) {
         BuildDocumentEvidenceRequest effectiveRequest = Objects.requireNonNull(request, "request must not be null")
                 .toBuilder()
-                .setContext(mapper.toRequestContext(context))
+                .setContext(mapper.toRequestContext(context, operationRequestId(context, request.getContext().getRequestId())))
                 .build();
         return invoke(
                 context,
+                effectiveRequest.getContext().getRequestId(),
                 Operation.BUILD_DOCUMENT_EVIDENCE,
                 stub -> stub.buildDocumentEvidence(effectiveRequest));
     }
@@ -99,21 +101,29 @@ public final class DocumentGrpcClient {
             VerifyEvidenceGraphRequest request) {
         VerifyEvidenceGraphRequest effectiveRequest = Objects.requireNonNull(request, "request must not be null")
                 .toBuilder()
-                .setContext(mapper.toRequestContext(context))
+                .setContext(mapper.toRequestContext(context, operationRequestId(context, request.getContext().getRequestId())))
                 .build();
         return invoke(
                 context,
+                effectiveRequest.getContext().getRequestId(),
                 Operation.VERIFY_EVIDENCE_GRAPH,
                 stub -> stub.verifyEvidenceGraph(effectiveRequest));
     }
 
+    /** Preserve the operation's correlation ID; never trust protobuf tenant/user fields. */
+    private static String operationRequestId(MissionContext context, String requestedId) {
+        Objects.requireNonNull(context, "context must not be null");
+        return requestedId == null || requestedId.isBlank() ? context.requestId() : requestedId;
+    }
+
     private <T> T invoke(
             MissionContext context,
+            String requestId,
             Operation operation,
             Function<DocumentServiceGrpc.DocumentServiceBlockingStub, T> invocation) {
         Duration deadline = resiliencePolicy.deadlineFor(operation);
         DocumentServiceGrpc.DocumentServiceBlockingStub callStub = baseStub
-                .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(mapper.toMetadata(context)))
+                .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(mapper.toMetadata(context, requestId)))
                 .withDeadlineAfter(deadline.toMillis(), TimeUnit.MILLISECONDS);
 
         try {

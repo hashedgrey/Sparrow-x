@@ -4,6 +4,7 @@ import com.sparrowx.agentic.adapters.document.DocumentClientMapper;
 import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.agentic.tools.document.DocumentSpanSearchRequestBuilder.Scope;
 import com.sparrowx.document.proto.BuildDocumentEvidenceRequest;
+import com.sparrowx.document.proto.DocumentScopeProto;
 import com.sparrowx.document.proto.EvidenceBuildContextProto;
 import com.sparrowx.document.proto.EvidenceBuildSpecProto;
 import com.sparrowx.document.proto.EvidenceGoalProto;
@@ -27,6 +28,9 @@ public final class DocumentEvidenceRequestBuilder {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(spec, "spec must not be null");
 
+        // A supplied exact scope is sufficient retrieval intent. Never turn
+        // verified document IDs into guessed text-search terms.
+        DocumentScopeProto documentScope = spec.scope().toProto();
         EvidenceBuildSpecProto evidenceSpec = EvidenceBuildSpecProto.newBuilder()
                 .setGoal(spec.goal())
                 .setCustomGoal(spec.customGoal())
@@ -48,7 +52,7 @@ public final class DocumentEvidenceRequestBuilder {
 
         return BuildDocumentEvidenceRequest.newBuilder()
                 .setContext(clientMapper.toRequestContext(context, spec.requestId()))
-                .setScope(spec.scope().toProto())
+                .setScope(documentScope)
                 .setSpec(evidenceSpec)
                 .setBuildContext(buildContext)
                 .setRetrievalMode(spec.retrievalMode())
@@ -105,12 +109,12 @@ public final class DocumentEvidenceRequestBuilder {
             entityNames = entityNames == null ? List.of() : List.copyOf(entityNames);
             keywords = keywords == null ? List.of() : List.copyOf(keywords);
 
-            if (retrievalHint.isBlank()
+            if (!scope.hasConstraints() && retrievalHint.isBlank()
                     && topics.isEmpty()
                     && entityNames.isEmpty()
                     && keywords.isEmpty()) {
                 throw new IllegalArgumentException(
-                        "at least one retrieval signal must be provided"
+                        "at least one retrieval signal or document scope must be provided"
                 );
             }
             metadataFilters = metadataFilters == null ? Map.of() : Map.copyOf(metadataFilters);
