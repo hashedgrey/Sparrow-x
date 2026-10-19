@@ -7,7 +7,6 @@ import com.sparrowx.agentic.actions.document.UploadDocumentAction;
 import com.sparrowx.agentic.actions.document.VerifyEvidenceGraphAction;
 import com.sparrowx.agentic.actions.governance.ApplyRedactionAction;
 import com.sparrowx.agentic.actions.governance.CheckGroundingAction;
-import com.sparrowx.agentic.actions.internal.ReadInternalCompanyGraphAction;
 import com.sparrowx.agentic.actions.internal.SearchInternalEntitiesAction;
 import com.sparrowx.agentic.actions.synthesis.BuildCitationsAction;
 import com.sparrowx.agentic.adapters.document.DocumentClientMapper;
@@ -15,12 +14,11 @@ import com.sparrowx.agentic.adapters.document.DocumentGrpcClient;
 import com.sparrowx.agentic.adapters.internal.InternalClientMapper;
 import com.sparrowx.agentic.adapters.internal.InternalGrpcClient;
 import com.sparrowx.agentic.agents.EmbabelMissionRunner;
-import com.sparrowx.agentic.agents.DefaultMissionEvidenceService;
 import com.sparrowx.agentic.agents.MissionAgent;
+import com.sparrowx.agentic.agents.MissionEvidenceActions;
 import com.sparrowx.agentic.components.IntentComponent;
-import com.sparrowx.agentic.components.PlanningComponent;
+import com.sparrowx.agentic.components.MissionGoalReviewComponent;
 import com.sparrowx.agentic.components.SynthesisComponent;
-import com.sparrowx.agentic.planning.PlanValidator;
 import com.sparrowx.agentic.prompts.StructuredOutputSchemas;
 import com.sparrowx.agentic.tools.document.DocumentEvidenceMapper;
 import com.sparrowx.agentic.tools.document.DocumentEvidenceRequestBuilder;
@@ -29,9 +27,8 @@ import com.sparrowx.agentic.tools.document.DocumentSpanSearchRequestBuilder;
 import com.sparrowx.agentic.tools.document.DocumentTool;
 import com.sparrowx.agentic.tools.document.UploadDocumentRequestBuilder;
 import com.sparrowx.agentic.tools.internal.InternalContextMapper;
-import com.sparrowx.agentic.tools.internal.InternalContextTool;
+import com.sparrowx.agentic.adapters.internal.GraphQueryRequestMapper;
 import com.sparrowx.agentic.tools.internal.InternalEntitySearchRequestBuilder;
-import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
@@ -54,9 +51,8 @@ import org.springframework.context.annotation.Import;
         DocumentSpanSearchRequestBuilder.class,
         DocumentEvidenceMapper.class,
         UploadDocumentRequestBuilder.class,
-        InternalContextTool.class,
         InternalEntitySearchRequestBuilder.class,
-        InternalGraphRequestBuilder.class,
+        GraphQueryRequestMapper.class,
         InternalContextMapper.class,
         BuildDocumentEvidenceAction.class,
         GetIngestionJobAction.class,
@@ -64,15 +60,13 @@ import org.springframework.context.annotation.Import;
         UploadDocumentAction.class,
         VerifyEvidenceGraphAction.class,
         SearchInternalEntitiesAction.class,
-        ReadInternalCompanyGraphAction.class,
         ApplyRedactionAction.class,
         CheckGroundingAction.class,
         BuildCitationsAction.class,
         IntentComponent.class,
-        PlanningComponent.class,
+        MissionGoalReviewComponent.class,
         SynthesisComponent.class,
-        PlanValidator.class,
-        DefaultMissionEvidenceService.class,
+        MissionEvidenceActions.class,
         MissionAgent.class,
         EmbabelMissionRunner.class
 })

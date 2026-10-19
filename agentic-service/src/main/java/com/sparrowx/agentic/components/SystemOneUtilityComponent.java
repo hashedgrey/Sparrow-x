@@ -128,33 +128,27 @@ public final class SystemOneUtilityComponent {
     }
 
     /**
-     * Apply the same deterministic capability gates as assessment() before
-     * asking System-1. Embabel hasRun flags prevent repeated evidence actions;
-     * scoring those actions after execution cannot affect the next plan.
+     * Allow re-evaluation of prior capabilities after new observations.
+     * Repetition limits are enforced by MissionGoalReviewComponent and agent
+     * value methods, not by suppressing every previously executed capability.
      *
      * Always retain SYNTHESIZE so an empty decision request is never sent.
      */
     private static Map<String, DecisionQuestion> activeQuestions(UtilityRequest request) {
         Map<String, DecisionQuestion> active = new LinkedHashMap<>(questions());
-        Set<String> executed = request.alreadyExecutedActions();
-
-        if ((!request.requiresDocumentEvidence()
-                && !hasDocumentDiscoverySignal(request.evidence()))
-                || executed.contains(DOCUMENT_ACTION)) {
+        if (!request.requiresDocumentEvidence()
+                && !hasDocumentDiscoverySignal(request.evidence())) {
             active.remove(DOCUMENT);
         }
 
-        if ((!request.requiresInternalContext()
-                && !hasInternalDiscoverySignal(request.evidence()))
-                || executed.contains(INTERNAL_ACTION)) {
+        if (!request.requiresInternalContext()
+                && !hasInternalDiscoverySignal(request.evidence())) {
             active.remove(INTERNAL);
         }
 
         if (request.resolvedEntityId().isBlank()) {
             active.remove(COMPANY_GRAPH);
             active.remove(LEARNING_GRAPH);
-        } else if (executed.contains(COMPANY_GRAPH_ACTION)) {
-            active.remove(COMPANY_GRAPH);
         }
 
         return active;
@@ -487,8 +481,24 @@ public final class SystemOneUtilityComponent {
             double synthesisUtility,
             String provider,
             String model,
-            String requestId
+            String requestId,
+            MissionGoalReviewComponent.Decision goalReview
     ) {
+        public UtilityAssessment(double documentUtility, double internalUtility,
+                                 double companyGraphUtility, double learningGraphUtility,
+                                 double synthesisUtility, String provider, String model,
+                                 String requestId) {
+            this(documentUtility, internalUtility, companyGraphUtility,
+                    learningGraphUtility, synthesisUtility, provider, model,
+                    requestId, null);
+        }
+
+        public UtilityAssessment withGoalReview(MissionGoalReviewComponent.Decision review) {
+            return new UtilityAssessment(documentUtility, internalUtility,
+                    companyGraphUtility, learningGraphUtility, synthesisUtility,
+                    provider, model, requestId, Objects.requireNonNull(review));
+        }
+
         public UtilityAssessment {
             requireProbability(
                     documentUtility,
