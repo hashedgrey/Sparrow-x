@@ -19,12 +19,6 @@ public final class InternalClientResiliencePolicy {
         for (Operation operation : Operation.values()) {
             Duration candidate = deadlines.get(operation);
 
-            // Preserve existing configuration, with an optional explicit override.
-            if (operation == Operation.DESCRIBE_INTERNAL_COMPANY_GRAPH
-                    && !deadlines.containsKey(operation)) {
-                candidate = deadlines.get(Operation.READ_INTERNAL_COMPANY_GRAPH);
-            }
-
             Duration deadline = Objects.requireNonNull(
                     candidate,
                     () -> "missing deadline for " + operation
@@ -71,9 +65,8 @@ public final class InternalClientResiliencePolicy {
 
     public enum Operation {
         SEARCH_INTERNAL_ENTITIES,
-        READ_INTERNAL_COMPANY_GRAPH,
-        EXPAND_INTERNAL_COMPANY_GRAPH,
-        DESCRIBE_INTERNAL_COMPANY_GRAPH
+        DESCRIBE_INTERNAL_COMPANY_GRAPH,
+        EXECUTE_INTERNAL_GRAPH_QUERY
     }
 
     public enum FailureKind {

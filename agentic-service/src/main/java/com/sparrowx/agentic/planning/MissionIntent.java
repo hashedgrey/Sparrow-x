@@ -60,9 +60,11 @@ public record MissionIntent(
     }
 
     /**
-     * Backward-compatible constructor for existing call sites that predate
-     * the explicit company-graph requirement.
+     * Compatibility constructor for callers using the earlier intent shape.
+     * New calls should explicitly supply graph requirements, rather than
+     * silently relying on this constructor's false default.
      */
+    @Deprecated
     public MissionIntent(
             String missionId,
             String objective,

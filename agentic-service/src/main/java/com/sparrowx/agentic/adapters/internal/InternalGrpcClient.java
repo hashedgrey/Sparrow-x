@@ -5,79 +5,56 @@ import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.internal.grpc.*;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.MetadataUtils;
-
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
+/** Preserves caller request IDs and authenticated metadata on all graph calls. */
 public final class InternalGrpcClient {
     private final InternalServiceGrpc.InternalServiceBlockingStub baseStub;
     private final InternalClientMapper mapper;
     private final InternalClientResiliencePolicy resiliencePolicy;
-
-    public InternalGrpcClient(InternalServiceGrpc.InternalServiceBlockingStub baseStub,
-                              InternalClientMapper mapper, InternalClientResiliencePolicy resiliencePolicy) {
-        this.baseStub = Objects.requireNonNull(baseStub);
-        this.mapper = Objects.requireNonNull(mapper);
-        this.resiliencePolicy = Objects.requireNonNull(resiliencePolicy);
+    public InternalGrpcClient(InternalServiceGrpc.InternalServiceBlockingStub stub,
+                              InternalClientMapper mapper,InternalClientResiliencePolicy policy) {
+        this.baseStub=Objects.requireNonNull(stub);
+        this.mapper=Objects.requireNonNull(mapper);
+        this.resiliencePolicy=Objects.requireNonNull(policy);
     }
-
     public SearchInternalEntitiesResponse searchInternalEntities(MissionContext context,
-                                                                 SearchInternalEntitiesRequest request) {
-        var effective = Objects.requireNonNull(request).toBuilder()
-                .setContext(mapper.toRequestContext(context)).build();
-        return invoke(context, Operation.SEARCH_INTERNAL_ENTITIES, stub -> stub.searchInternalEntities(effective));
+                                                                  SearchInternalEntitiesRequest request) {
+        String id=requestId(request.getContext().getRequestId());
+        var effective=request.toBuilder().setContext(mapper.toRequestContext(context,id)).build();
+        return invoke(context,id,Operation.SEARCH_INTERNAL_ENTITIES,
+                stub->stub.searchInternalEntities(effective));
     }
-
-    public ReadInternalCompanyGraphResponse readInternalCompanyGraph(MissionContext context,
-                                                                     ReadInternalCompanyGraphRequest request) {
-        var effective = Objects.requireNonNull(request).toBuilder()
-                .setContext(mapper.toRequestContext(context)).build();
-        return invoke(context, Operation.READ_INTERNAL_COMPANY_GRAPH, stub -> stub.readInternalCompanyGraph(effective));
-    }
-
-    public ExpandInternalCompanyGraphResponse expandInternalCompanyGraph(MissionContext context,
-                                                                         ExpandInternalCompanyGraphRequest request) {
-        String id = requireRequestId(request.getContext().getRequestId());
-        var effective = request.toBuilder().setContext(mapper.toRequestContext(context, id)).build();
-        return invoke(context, Operation.EXPAND_INTERNAL_COMPANY_GRAPH,
-                stub -> stub.expandInternalCompanyGraph(effective));
-    }
-
     public DescribeInternalCompanyGraphResponse describeInternalCompanyGraph(MissionContext context,
                                                                              DescribeInternalCompanyGraphRequest request) {
         Objects.requireNonNull(request);
-        String id = request.getContext().getRequestId();
-        var effective = request.toBuilder().setContext(id.isBlank()
-                ? mapper.toRequestContext(context) : mapper.toRequestContext(context, id)).build();
-        return invoke(context, Operation.DESCRIBE_INTERNAL_COMPANY_GRAPH,
-                stub -> stub.describeInternalCompanyGraph(effective));
+        String raw=request.getContext().getRequestId();
+        String id=raw.isBlank()?requestId(context.requestId()):raw;
+        var effective=request.toBuilder().setContext(mapper.toRequestContext(context,id)).build();
+        return invoke(context,id,Operation.DESCRIBE_INTERNAL_COMPANY_GRAPH,
+                stub->stub.describeInternalCompanyGraph(effective));
     }
-
     public ExecuteInternalCompanyGraphQueryResponse executeInternalCompanyGraphQuery(MissionContext context,
                                                                                      ExecuteInternalCompanyGraphQueryRequest request) {
-        Objects.requireNonNull(request);
-        String id = requireRequestId(request.getContext().getRequestId());
-        var effective = request.toBuilder().setContext(mapper.toRequestContext(context, id)).build();
-        return invoke(context, Operation.READ_INTERNAL_COMPANY_GRAPH,
-                stub -> stub.executeInternalCompanyGraphQuery(effective));
+        String id=requestId(request.getContext().getRequestId());
+        var effective=request.toBuilder().setContext(mapper.toRequestContext(context,id)).build();
+        return invoke(context,id,Operation.EXECUTE_INTERNAL_GRAPH_QUERY,
+                stub->stub.executeInternalCompanyGraphQuery(effective));
     }
-
-    private static String requireRequestId(String id) {
-        if (id == null || id.isBlank()) throw new IllegalArgumentException("Graph requestId is required");
+    private <T> T invoke(MissionContext context,String requestId,Operation operation,
+                         Function<InternalServiceGrpc.InternalServiceBlockingStub,T> call) {
+        Duration deadline=resiliencePolicy.deadlineFor(operation);
+        var stub=baseStub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(
+                        mapper.toMetadata(context,requestId)))
+                .withDeadlineAfter(deadline.toMillis(),TimeUnit.MILLISECONDS);
+        try { return call.apply(stub); }
+        catch(StatusRuntimeException ex) { throw resiliencePolicy.translate(operation,ex); }
+    }
+    private static String requestId(String id) {
+        if (id==null || id.isBlank()) throw new IllegalArgumentException("Graph requestId is required");
         return id;
-    }
-
-    private <T> T invoke(MissionContext context, Operation operation,
-                         Function<InternalServiceGrpc.InternalServiceBlockingStub, T> invocation) {
-        Duration deadline = resiliencePolicy.deadlineFor(operation);
-        var stub = baseStub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(mapper.toMetadata(context)))
-                .withDeadlineAfter(deadline.toMillis(), TimeUnit.MILLISECONDS);
-        try {
-            return invocation.apply(stub);
-        } catch (StatusRuntimeException exception) {
-            throw resiliencePolicy.translate(operation, exception);
-        }
     }
 }
