@@ -3,115 +3,111 @@ package com.sparrowx.agentic.steps;
 import buildingblocks.contracts.GraphQueryRequest;
 import com.sparrowx.agentic.components.GraphEvidenceGoalResolver;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
+import com.sparrowx.agentic.trace.MissionDecisionTraceContext;
 import com.sparrowx.agentic.mission.model.MissionContext;
-import com.sparrowx.agentic.planning.graph.GraphResolutionStatus;
 import com.sparrowx.agentic.planning.MissionIntent;
+import com.sparrowx.agentic.planning.graph.GraphResolutionStatus;
 import com.sparrowx.agentic.planning.graph.GraphRootScope;
 import com.sparrowx.agentic.tools.internal.GraphEvidenceProjector;
-import com.sparrowx.agentic.tools.internal.InternalContextTool;
-import com.sparrowx.agentic.tools.internal.InternalGraphRequestBuilder;
-import com.sparrowx.internal.grpc.InternalGraphNodeType;
+import com.sparrowx.agentic.adapters.internal.InternalGrpcClient;
+import com.sparrowx.agentic.adapters.internal.GraphQueryRequestMapper;
 import org.springframework.stereotype.Component;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.util.*;
 
-/** Compiles one semantic query per root type and lets IntSvc evaluate each complete root set. */
+/** Typed, batch-executed graph goals for arbitrary tenant ontology node types. */
 @Component
 public final class GoalDirectedCompanyGraphStep {
-    private final GraphEvidenceGoalResolver goalResolver;
-    private final InternalGraphRequestBuilder requests;
-    private final InternalContextTool tool;
-
-    public GoalDirectedCompanyGraphStep(GraphEvidenceGoalResolver goalResolver,
-            InternalGraphRequestBuilder requests, InternalContextTool tool) {
-        this.goalResolver = Objects.requireNonNull(goalResolver);
-        this.requests = Objects.requireNonNull(requests);
-        this.tool = Objects.requireNonNull(tool);
+    private static final Logger LOG = LoggerFactory.getLogger(GoalDirectedCompanyGraphStep.class);
+    private final GraphEvidenceGoalResolver resolver;
+    private final GraphQueryRequestMapper requests;
+    private final InternalGrpcClient client;
+    public GoalDirectedCompanyGraphStep(GraphEvidenceGoalResolver resolver,
+                                        GraphQueryRequestMapper requests, InternalGrpcClient client) {
+        this.resolver=Objects.requireNonNull(resolver);
+        this.requests=Objects.requireNonNull(requests);
+        this.client=Objects.requireNonNull(client);
     }
-
-    public record SelectedRoot(String entityId, InternalGraphNodeType nodeType) {
+    public record SelectedRoot(String entityId,String nodeType) {
         public SelectedRoot {
-            if (entityId == null || entityId.isBlank()) throw new IllegalArgumentException("Root ID required");
-            Objects.requireNonNull(nodeType);
+            if (entityId==null || entityId.isBlank() || nodeType==null || nodeType.isBlank())
+                throw new IllegalArgumentException("Resolved root identity/type required");
         }
     }
-    public record Prepared(Map<String, InternalGraphNodeType> selectedRoots,
-            Map<InternalGraphNodeType, GraphEvidenceGoalResolver.Resolution> compiledGoals, String query) {
+    public record Prepared(Map<String,Set<String>> rootsByType,
+                           Map<String,GraphEvidenceGoalResolver.Resolution> compiledGoals,String query) {
         public Prepared {
-            selectedRoots = Map.copyOf(selectedRoots);
-            compiledGoals = Map.copyOf(compiledGoals);
-            if (selectedRoots.isEmpty() || compiledGoals.isEmpty())
+            Map<String,Set<String>> safe=new LinkedHashMap<>();
+            rootsByType.forEach((type,ids)->safe.put(type,Set.copyOf(ids)));
+            rootsByType=Map.copyOf(safe);
+            compiledGoals=Map.copyOf(compiledGoals);
+            if (rootsByType.isEmpty() || compiledGoals.isEmpty())
                 throw new IllegalArgumentException("Empty graph query plan");
         }
     }
-    public record Result(GraphResolutionStatus status, List<EvidenceRef> evidenceRefs, List<String> warnings,
-            String summary, Map<String, Object> attributes) {
+    public record Result(GraphResolutionStatus status,List<EvidenceRef> evidenceRefs,
+                         List<String> warnings,String summary,Map<String,Object> attributes) {
         public Result {
-            evidenceRefs = List.copyOf(evidenceRefs);
-            warnings = List.copyOf(warnings);
-            attributes = Map.copyOf(attributes);
+            evidenceRefs=List.copyOf(evidenceRefs);warnings=List.copyOf(warnings);
+            attributes=Map.copyOf(attributes);
         }
     }
-
-    public Prepared prepare(MissionContext context, String requestId, List<SelectedRoot> roots,
-            MissionIntent intent, String query) {
+    public Prepared prepare(MissionContext context,String requestId,List<SelectedRoot> roots,
+                            MissionIntent intent,String query) {
         Objects.requireNonNull(context); Objects.requireNonNull(roots); Objects.requireNonNull(intent);
-        if (requestId == null || requestId.isBlank() || query == null || query.isBlank() || roots.isEmpty())
-            throw new IllegalArgumentException("Batch ID, question and roots are required");
-        Map<String, InternalGraphNodeType> selected = new LinkedHashMap<>();
-        Map<InternalGraphNodeType, Set<String>> groups = new LinkedHashMap<>();
-        for (SelectedRoot root : roots) {
-            if (selected.putIfAbsent(root.entityId(), root.nodeType()) != null)
-                throw new IllegalArgumentException("Duplicate root ID");
-            groups.computeIfAbsent(root.nodeType(), unused -> new LinkedHashSet<>()).add(root.entityId());
+        if (requestId==null || requestId.isBlank() || query==null || query.isBlank() || roots.isEmpty())
+            throw new IllegalArgumentException("Request ID, question and roots required");
+        Map<String,Set<String>> grouped=new LinkedHashMap<>();
+        Set<String> identities=new HashSet<>();
+        for (SelectedRoot root:roots) {
+            if (!identities.add(root.nodeType()+":"+root.entityId()))
+                throw new IllegalArgumentException("Duplicate root identity");
+            grouped.computeIfAbsent(root.nodeType(),v->new LinkedHashSet<>()).add(root.entityId());
         }
-        Map<InternalGraphNodeType, GraphEvidenceGoalResolver.Resolution> compiled = new LinkedHashMap<>();
-        groups.forEach((type, ids) -> compiled.put(type,
-                goalResolver.compile(context, intent, query,
-                        new GraphRootScope(nodeTypeName(type), ids), requestId + ":goal:" + type.name())));
-        return new Prepared(selected, compiled, query);
+        Map<String,GraphEvidenceGoalResolver.Resolution> compiled=new LinkedHashMap<>();
+        grouped.forEach((type,ids)->compiled.put(type,resolver.compile(context,intent,query,
+                new GraphRootScope(type,ids),requestId+":goal:"+type)));
+        return new Prepared(grouped,compiled,query);
     }
-
-    public Result executeBatch(MissionContext context, String requestId, Prepared prepared,
-            InternalGraphNodeType type) {
+    public Result executeBatch(MissionContext context,String requestId,Prepared prepared,String type) {
         Objects.requireNonNull(prepared);
-        var resolution = Objects.requireNonNull(prepared.compiledGoals().get(type), "Unknown root type");
-        if (!resolution.ready()) return failed(resolution.status(), resolution.reason());
-        GraphQueryRequest query = resolution.query();
-        Set<String> selected = new HashSet<>();
-        prepared.selectedRoots().forEach((id, nodeType) -> {
-            if (nodeType == type) selected.add(id);
-        });
-        if (!query.rootType().equals(nodeTypeName(type)) || !query.rootIds().equals(selected))
-            throw new IllegalArgumentException("Compiled query does not match the resolved root set");
+        var resolution=Objects.requireNonNull(prepared.compiledGoals().get(type),"Unknown root type");
+        if (!resolution.ready()) return failed(resolution.status(),resolution.reason());
+        GraphQueryRequest query=resolution.query();
+        Set<String> selected=Objects.requireNonNull(prepared.rootsByType().get(type));
+        if (!query.rootType().equals(type) || !query.rootIds().equals(selected))
+            throw new IllegalArgumentException("Compiled graph query root scope differs from verified roots");
         try {
-            var response = tool.executeCompanyGraphQuery(context,
-                    requests.buildCompanyGraphQuery(context, requestId, query));
+            var response=client.executeInternalCompanyGraphQuery(context,
+                    requests.toProto(context,requestId,query));
             if (response.getTruncated() || !Set.copyOf(response.getEvaluatedRootEntityIdsList()).equals(selected))
-                return failed(GraphResolutionStatus.INSUFFICIENT, "Graph query did not exhaust the resolved root set");
-            var rows = GraphEvidenceProjector.project(response);
-            var refs = GraphEvidenceProjector.evidence(response, requestId, selected);
-            return new Result(GraphResolutionStatus.COMPLETE, refs, List.of(),
-                    rows.isEmpty() ? "Exhaustive graph query found no matching rows"
-                            : "Resolved " + selected.size() + " graph roots",
-                    Map.of("graphResolutionStatus", GraphResolutionStatus.COMPLETE.name(),
-                            "validatedGraphAnswerRows", rows, "evaluatedRoots", selected.size(),
-                            "matchingRowCount", rows.size()));
-        } catch (RuntimeException e) {
-            return failed(GraphResolutionStatus.INSUFFICIENT, "IntSvc graph query failed: " + e.getClass().getSimpleName());
+                return failed(GraphResolutionStatus.INSUFFICIENT,
+                        "Graph query did not exhaust verified root set");
+            var rows=GraphEvidenceProjector.project(response);
+            var refs=GraphEvidenceProjector.evidence(response,requestId,selected,query);
+            MissionDecisionTraceContext.event("GRAPH_QUERY_RESULT", "Verified graph query result",
+                    Map.of("rootType", type, "rootCount", Integer.toString(selected.size()),
+                            "resultCount", Integer.toString(rows.size()),
+                            "complete", "true", "truncated", "false"));
+            return new Result(GraphResolutionStatus.COMPLETE,refs,List.of(),
+                    rows.isEmpty()?"Exhaustive query found no matching rows":"Resolved graph roots",
+                    Map.of("graphResolutionStatus",GraphResolutionStatus.COMPLETE.name(),
+                            "validatedGraphAnswerRows",rows,"evaluatedRoots",selected.size(),
+                            "matchingRowCount",rows.size()));
+        } catch (SecurityException | IllegalArgumentException error) {
+            // Do not relabel authorization and programming defects as a
+            // recoverable evidence shortage.
+            throw error;
+        } catch (RuntimeException error) {
+            LOG.warn("Graph query execution failed requestId={} rootType={} exception={}",
+                    requestId, type, error.getClass().getName(), error);
+            return failed(GraphResolutionStatus.INSUFFICIENT,
+                    "Graph query execution failed; inspect mission trace");
         }
     }
-
-    private static Result failed(GraphResolutionStatus status, String reason) {
-        return new Result(status, List.of(), List.of(reason), reason,
-                Map.of("graphResolutionStatus", status.name(), "graphResolutionReason", reason));
-    }
-    private static String nodeTypeName(InternalGraphNodeType type) {
-        String prefix = "INTERNAL_GRAPH_NODE_TYPE_";
-        if (type == null || type == InternalGraphNodeType.UNRECOGNIZED
-                || type == InternalGraphNodeType.INTERNAL_GRAPH_NODE_TYPE_UNSPECIFIED
-                || !type.name().startsWith(prefix))
-            throw new IllegalArgumentException("Invalid graph root node type");
-        return type.name().substring(prefix.length());
+    private static Result failed(GraphResolutionStatus status,String reason) {
+        return new Result(status,List.of(),List.of(reason),reason,
+                Map.of("graphResolutionStatus",status.name(),"graphResolutionReason",reason));
     }
 }
