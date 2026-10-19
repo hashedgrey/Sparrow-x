@@ -1,4 +1,4 @@
-package com.sparrowx.internal.data.neo4j.graph;
+package com.sparrowx.internal.data.neo4j;
 
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.SessionConfig;

@@ -1,7 +1,7 @@
 package com.sparrowx.internal.features.getinternalgraphcontext;
 
 import buildingblocks.core.queries.QueryHandler;
-import com.sparrowx.internal.data.postgres.graph.PostgresCompanyGraphReadClient;
+import com.sparrowx.internal.data.neo4j.Neo4jCompanyGraphReadClient;
 import com.sparrowx.internal.valueobjects.InternalGraphNodeType;
 import com.sparrowx.internal.valueobjects.InternalGraphType;
 import org.springframework.stereotype.Component;
@@ -10,11 +10,11 @@ import org.springframework.stereotype.Component;
 @Component
 public final class GetInternalGraphContextQueryHandler
         implements QueryHandler<GetInternalGraphContextQuery, GetInternalGraphContextResult> {
-    private final PostgresCompanyGraphReadClient graphReadClient;
+    private final Neo4jCompanyGraphReadClient graphReadClient;
     private final GetInternalGraphContextQueryValidator validator;
 
     public GetInternalGraphContextQueryHandler(
-            PostgresCompanyGraphReadClient graphReadClient,
+            Neo4jCompanyGraphReadClient graphReadClient,
             GetInternalGraphContextQueryValidator validator) {
         this.graphReadClient = graphReadClient;
         this.validator = validator;

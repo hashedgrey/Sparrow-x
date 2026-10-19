@@ -1,4 +1,4 @@
-package com.sparrowx.internal.data.neo4j.graph;
+package com.sparrowx.internal.data.neo4j;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;

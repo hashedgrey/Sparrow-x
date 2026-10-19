@@ -1,7 +1,7 @@
 package com.sparrowx.internal.features.expandinternalcompanygraph;
 
 import buildingblocks.core.queries.QueryHandler;
-import com.sparrowx.internal.data.neo4j.graph.Neo4jCompanyGraphReadClient;
+import com.sparrowx.internal.data.neo4j.Neo4jCompanyGraphReadClient;
 import com.sparrowx.internal.exceptions.InternalValidationException;
 import org.springframework.stereotype.Component;
 
