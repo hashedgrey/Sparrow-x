@@ -1,6 +1,7 @@
 package com.sparrowx.internal.data.postgres.repositories;
 
 import com.sparrowx.internal.data.postgres.entities.TeamEntity;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -41,6 +42,11 @@ public interface TeamJpaRepository extends JpaRepository<TeamEntity, String> {
     List<TeamEntity> searchByTenantIdAndText(
             @Param("tenantId") String tenantId,
             @Param("query") String query
+    );
+
+    List<TeamEntity> findByTenantIdOrderByTeamIdAsc(
+            String tenantId,
+            Pageable pageable
     );
 
     List<TeamEntity> findAllByTenantIdAndTeamIdIn(
