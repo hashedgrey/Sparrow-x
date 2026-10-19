@@ -6,6 +6,7 @@ import com.sparrowx.agentic.features.streammissionprogress.MissionEventCursor;
 import com.sparrowx.agentic.mappers.AgenticMapper;
 import com.sparrowx.agentic.mission.model.MissionProgressEvent;
 import com.sparrowx.agentic.mission.model.MissionStreamEvent;
+import com.sparrowx.agentic.trace.TraceSseProjection;
 import com.sparrowx.agentic.proto.GetMissionResultRequest;
 import com.sparrowx.agentic.proto.MissionConstraints;
 import com.sparrowx.agentic.proto.MissionResultResponse;
@@ -591,6 +592,14 @@ public final class AssistantMissionSseController {
         data.put("progressPercent", event.progressPercent());
         data.put("resumeToken", event.resumeToken());
         data.put("emittedAt", event.emittedAt().toString());
+
+        // Trace spans are already persisted in MissionProgressEvent.metadata.
+        // Project only the existing allowlisted fields; otherwise the goal,
+        // JEV/LLM and blackboard events disappear at the SSE boundary.
+        Map<String, Object> trace = TraceSseProjection.fromMetadata(event.metadata());
+        if (!trace.isEmpty()) {
+            data.put("trace", trace);
+        }
 
         if (event.currentComponent() != null) {
 
