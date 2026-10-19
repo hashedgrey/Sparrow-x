@@ -1,53 +1,22 @@
 package com.sparrowx.internal.features.describeinternalcompanygraph;
 
 import buildingblocks.core.queries.QueryHandler;
-import com.sparrowx.internal.data.neo4j.graph.Neo4jCompanyGraphOntologyReader;
+import com.sparrowx.internal.data.neo4j.Neo4jCompanyGraphOntologyReader;
 import org.springframework.stereotype.Component;
-
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.Objects;
 
 @Component
 public final class DescribeInternalCompanyGraphQueryHandler
-        implements QueryHandler<
-        DescribeInternalCompanyGraphQuery,
-        DescribeInternalCompanyGraphResult> {
-
+        implements QueryHandler<DescribeInternalCompanyGraphQuery, DescribeInternalCompanyGraphResult> {
     private final Neo4jCompanyGraphOntologyReader reader;
-
-    public DescribeInternalCompanyGraphQueryHandler(
-            Neo4jCompanyGraphOntologyReader reader
-    ) {
-        this.reader = Objects.requireNonNull(reader, "reader is required");
+    public DescribeInternalCompanyGraphQueryHandler(Neo4jCompanyGraphOntologyReader reader) {
+        this.reader = Objects.requireNonNull(reader);
     }
-
     @Override
-    public DescribeInternalCompanyGraphResult handle(
-            DescribeInternalCompanyGraphQuery query
-    ) {
-        Objects.requireNonNull(query, "query is required");
-
-        String json = reader.describe(query.tenantId());
-
-        return new DescribeInternalCompanyGraphResult(
-                json,
-                sha256(json)
-        );
-    }
-
-    private static String sha256(String json) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(json.getBytes(StandardCharsets.UTF_8));
-            return "sha256:" + HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException(
-                    "SHA-256 is unavailable",
-                    exception
-            );
-        }
+    public DescribeInternalCompanyGraphResult handle(DescribeInternalCompanyGraphQuery query) {
+        Objects.requireNonNull(query);
+        // Ontology JSON and fingerprint MUST derive from the same snapshot.
+        var snapshot = reader.describeSnapshot(query.tenantId());
+        return new DescribeInternalCompanyGraphResult(snapshot.ontologyJson(), snapshot.schemaVersion());
     }
 }

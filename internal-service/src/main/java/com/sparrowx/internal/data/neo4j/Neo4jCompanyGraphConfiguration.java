@@ -1,4 +1,4 @@
-package com.sparrowx.internal.data.neo4j.graph;
+package com.sparrowx.internal.data.neo4j;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.neo4j.driver.AuthTokens;
@@ -44,6 +44,12 @@ public class Neo4jCompanyGraphConfiguration {
     @Bean
     Neo4jCompanyGraphOntologyReader companyGraphOntologyReader(Neo4jGraphSessions sessions, ObjectMapper json) {
         return new Neo4jCompanyGraphOntologyReader(sessions, json);
+    }
+
+    @Bean
+    Neo4jCompanyGraphRootScanner companyGraphRootScanner(Neo4jGraphSessions sessions,
+                                                          Neo4jGraphQueryClient authorizedQueries) {
+        return new Neo4jCompanyGraphRootScanner(sessions, authorizedQueries);
     }
 
     @Bean

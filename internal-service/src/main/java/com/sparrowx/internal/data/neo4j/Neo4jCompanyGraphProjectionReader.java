@@ -1,4 +1,4 @@
-package com.sparrowx.internal.data.neo4j.graph;
+package com.sparrowx.internal.data.neo4j;
 
 import org.neo4j.driver.TransactionContext;
 import org.neo4j.driver.types.Relationship;

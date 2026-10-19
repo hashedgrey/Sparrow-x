@@ -4,13 +4,13 @@ import buildingblocks.contracts.GraphQueryRequest;
 import buildingblocks.contracts.GraphQueryResult;
 import com.google.protobuf.Timestamp;
 import com.sparrowx.internal.grpc.*;
-
 import java.util.*;
 
-/** Converts the wire contract without interpreting user supplied Cypher. */
+/** Domain/wire conversion, without user-supplied Cypher. */
 public final class GraphQueryGrpcMapper {
-    private GraphQueryGrpcMapper() { }
+    private GraphQueryGrpcMapper() {}
 
+    /** The only protobuf-to-domain graph query mapper (including selection). */
     public static GraphQueryRequest toQuery(ExecuteInternalCompanyGraphQueryRequest wire) {
         List<GraphQueryRequest.Traverse> traversals = wire.getTraversalsList().stream().map(t ->
                 new GraphQueryRequest.Traverse(t.getSource(), t.getRelationshipVariable(),
@@ -18,22 +18,39 @@ public final class GraphQueryGrpcMapper {
         List<GraphQueryRequest.Predicate> predicates = wire.getPredicatesList().stream().map(p ->
                 new GraphQueryRequest.Predicate(p.getVariable(), p.getField(), compare(p.getCompare()),
                         value(p.getValue()))).toList();
+        List<GraphQueryRequest.FieldComparison> fieldComparisons = wire.getFieldComparisonsList().stream().map(c ->
+                new GraphQueryRequest.FieldComparison(c.getLeftVariable(), c.getLeftField(),
+                        compare(c.getCompare()), c.getRightVariable(), c.getRightField())).toList();
+        List<GraphQueryRequest.NegatedTraversal> negatedTraversals = wire.getNegatedTraversalsList().stream().map(t ->
+                new GraphQueryRequest.NegatedTraversal(t.getSource(), t.getRelationshipType(),
+                        direction(t.getDirection()), t.getTargetType())).toList();
         List<GraphQueryRequest.Projection> projections = wire.getProjectionsList().stream().map(p ->
                 new GraphQueryRequest.Projection(p.getVariable(), p.getField(), p.getAlias())).toList();
         if (wire.getRootEntityIdsCount() != new HashSet<>(wire.getRootEntityIdsList()).size())
             throw new IllegalArgumentException("Duplicate root entity ID");
         return new GraphQueryRequest(wire.getRootType(), Set.copyOf(wire.getRootEntityIdsList()),
-                traversals, predicates, projections, wire.getMaxRows(), wire.getRequireComplete());
+                traversals, predicates, projections, wire.getMaxRows(), wire.getRequireComplete(),
+                wire.getSchemaVersion(), fieldComparisons, negatedTraversals,
+                wire.hasSelection() ? selection(wire.getSelection()) : null);
+    }
+
+    private static GraphQueryRequest.Selection selection(GraphQuerySelection selection) {
+        return new GraphQueryRequest.Selection(
+                selection.getOnePerGroupByList(),
+                selection.getOrderByList().stream()
+                        .map(sort -> new GraphQueryRequest.Sort(sort.getAlias(), sort.getDescending()))
+                        .toList(),
+                selection.getRandom(), selection.getLimit());
     }
 
     public static ExecuteInternalCompanyGraphQueryResponse toResponse(GraphQueryResult result) {
-        ExecuteInternalCompanyGraphQueryResponse.Builder wire = ExecuteInternalCompanyGraphQueryResponse.newBuilder()
+        var wire = ExecuteInternalCompanyGraphQueryResponse.newBuilder()
                 .setTruncated(result.truncated())
                 .addAllEvaluatedRootEntityIds(result.evaluatedRootIds().stream().sorted().toList())
                 .setRetrievedAt(Timestamp.newBuilder().setSeconds(result.retrievedAt().getEpochSecond())
                         .setNanos(result.retrievedAt().getNano()));
-        for (Map<String, Object> row : result.rows()) {
-            GraphQueryRow.Builder output = GraphQueryRow.newBuilder();
+        for (Map<String,Object> row : result.rows()) {
+            var output = GraphQueryRow.newBuilder();
             Object root = row.get("__rootEntityId");
             if (!(root instanceof String id) || id.isBlank() || !result.evaluatedRootIds().contains(id))
                 throw new IllegalStateException("Query returned an unscoped root");
@@ -48,28 +65,33 @@ public final class GraphQueryGrpcMapper {
         }
         return wire.build();
     }
-
-    private static void copyIds(Object raw, java.util.function.BiConsumer<String, String> sink) {
-        if (!(raw instanceof Map<?, ?> map)) throw new IllegalStateException("Missing query provenance");
-        map.forEach((key, value) -> {
-            if (!(key instanceof String k) || !(value instanceof String v) || v.isBlank())
+    private static void copyIds(Object raw, java.util.function.BiConsumer<String,String> sink) {
+        if (!(raw instanceof Map<?,?> map)) throw new IllegalStateException("Missing query provenance");
+        map.forEach((key,val) -> {
+            if (!(key instanceof String k) || !(val instanceof String v) || v.isBlank())
                 throw new IllegalStateException("Invalid query provenance");
-            sink.accept(k, v);
+            sink.accept(k,v);
         });
     }
-
     private static GraphQueryValue toValue(Object value) {
-        GraphQueryValue.Builder builder = GraphQueryValue.newBuilder();
-        if (value == null) return builder.build();
-        if (value instanceof String s) return builder.setText(s).build();
-        if (value instanceof Integer n) return builder.setInteger(n).build();
-        if (value instanceof Long n) return builder.setInteger(n).build();
-        if (value instanceof Float n) return builder.setDecimal(n).build();
-        if (value instanceof Double n) return builder.setDecimal(n).build();
-        if (value instanceof Boolean b) return builder.setBoolean(b).build();
-        throw new IllegalStateException("Unsupported graph result scalar: " + value.getClass());
+        var wire = GraphQueryValue.newBuilder();
+        if (value == null) return wire.build(); // Unset oneof represents a null projection.
+        if (value instanceof String v) return wire.setText(v).build();
+        if (value instanceof Integer v) return wire.setInteger(v).build();
+        if (value instanceof Long v) return wire.setInteger(v).build();
+        if (value instanceof Float v) return wire.setDecimal(v).build();
+        if (value instanceof Double v) return wire.setDecimal(v).build();
+        if (value instanceof Boolean v) return wire.setBoolean(v).build();
+        if (value instanceof List<?> values) {
+            // Neo4j properties may contain lists, even when each item is scalar.
+            if (values.size() > 1000)
+                throw new IllegalStateException("Graph projection exceeds list item budget");
+            var items = GraphQueryValues.newBuilder();
+            for (Object item : values) items.addValues(toValue(item));
+            return wire.setItems(items).build();
+        }
+        throw new IllegalStateException("Unsupported graph projection type: " + value.getClass());
     }
-
     private static Object value(GraphQueryValue value) {
         return switch (value.getKindCase()) {
             case TEXT -> value.getText();
@@ -80,15 +102,15 @@ public final class GraphQueryGrpcMapper {
             case KIND_NOT_SET -> throw new IllegalArgumentException("Predicate value is missing");
         };
     }
-    private static GraphQueryRequest.Direction direction(GraphQueryDirection direction) {
-        return switch (direction) {
+    private static GraphQueryRequest.Direction direction(GraphQueryDirection d) {
+        return switch (d) {
             case GRAPH_QUERY_DIRECTION_IN -> GraphQueryRequest.Direction.IN;
             case GRAPH_QUERY_DIRECTION_OUT -> GraphQueryRequest.Direction.OUT;
             default -> throw new IllegalArgumentException("Unspecified graph direction");
         };
     }
-    private static GraphQueryRequest.Compare compare(GraphQueryCompare compare) {
-        return switch (compare) {
+    private static GraphQueryRequest.Compare compare(GraphQueryCompare c) {
+        return switch (c) {
             case GRAPH_QUERY_COMPARE_EQ -> GraphQueryRequest.Compare.EQ;
             case GRAPH_QUERY_COMPARE_NE -> GraphQueryRequest.Compare.NE;
             case GRAPH_QUERY_COMPARE_CONTAINS -> GraphQueryRequest.Compare.CONTAINS;
