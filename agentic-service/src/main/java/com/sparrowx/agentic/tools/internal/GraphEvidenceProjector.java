@@ -1,17 +1,18 @@
 package com.sparrowx.agentic.tools.internal;
 
+import buildingblocks.contracts.GraphQueryRequest;
 import com.sparrowx.agentic.mission.evidence.EvidenceRef;
 import com.sparrowx.agentic.mission.evidence.EvidenceSourceType;
 import com.sparrowx.internal.grpc.*;
 
 import java.util.*;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 public final class GraphEvidenceProjector {
-    private GraphEvidenceProjector() { }
+    private GraphEvidenceProjector() {}
 
-    /** Rows are already validated and evaluated by IntSvc; preserve null/missing values. */
+    private static final Set<String> RESERVED = Set.of("rootEntityId", "nodes", "relationships");
+
+    /** Do not overwrite or hide model-selected outputs with provenance metadata. */
     public static List<Map<String, Object>> project(ExecuteInternalCompanyGraphQueryResponse response) {
         Objects.requireNonNull(response);
         List<Map<String, Object>> projected = new ArrayList<>();
@@ -22,7 +23,8 @@ public final class GraphEvidenceProjector {
             Map<String, Object> output = new LinkedHashMap<>();
             output.put("rootEntityId", row.getRootEntityId());
             for (var cell : row.getValuesMap().entrySet()) {
-                if (cell.getKey().startsWith("__") || output.containsKey(cell.getKey()))
+                if (cell.getKey().startsWith("__") || RESERVED.contains(cell.getKey())
+                        || output.containsKey(cell.getKey()))
                     throw new IllegalStateException("Reserved or duplicate graph output alias");
                 output.put(cell.getKey(), value(cell.getValue()));
             }
@@ -33,14 +35,75 @@ public final class GraphEvidenceProjector {
         return List.copyOf(projected);
     }
 
-    /** One proof covers the evaluated root set, including an exhaustive zero-row result. */
+    /**
+     * Provenance includes the constrained, backend-validated query semantics.
+     * A non-truncated result with an EQ predicate proves returned rows satisfy
+     * that predicate even when the matching field was not selected as output.
+     * This does NOT assert that all tenant entities were searched: only the
+     * verified root IDs were evaluated.
+     */
     public static List<EvidenceRef> evidence(ExecuteInternalCompanyGraphQueryResponse response,
-            String requestId, Set<String> requestedRoots) {
-        if (response.getTruncated() || !Set.copyOf(response.getEvaluatedRootEntityIdsList()).equals(requestedRoots))
-            throw new IllegalStateException("Incomplete graph query cannot be cited as evidence");
+                                             String requestId, Set<String> requestedRoots,
+                                             GraphQueryRequest executedQuery) {
+        Objects.requireNonNull(response, "response");
+        Objects.requireNonNull(requestedRoots, "requestedRoots");
+        Objects.requireNonNull(executedQuery, "executedQuery");
+        if (!executedQuery.requireComplete() ||
+                !executedQuery.rootIds().equals(requestedRoots) ||
+                response.getTruncated() ||
+                !Set.copyOf(response.getEvaluatedRootEntityIdsList()).equals(requestedRoots))
+            throw new IllegalStateException("Incomplete or mismatched graph query cannot be cited as evidence");
+
+        // Check result values against the exact compiled output contract. The
+        // backend may omit a null projection but must not introduce new fields.
+        Set<String> projectedAliases = new HashSet<>();
+        executedQuery.projections().forEach(p -> projectedAliases.add(p.alias()));
+        for (GraphQueryRow row : response.getRowsList()) {
+            if (!projectedAliases.containsAll(row.getValuesMap().keySet())) {
+                throw new IllegalStateException("IntSvc returned undeclared projection aliases");
+            }
+        }
+
+        List<Map<String, Object>> traversals = executedQuery.traversals().stream().map(t ->
+                Map.<String, Object>of("source", t.source(), "relationshipVariable", t.relationshipVariable(),
+                        "relationshipType", t.relationshipType(), "direction", t.direction().name(),
+                        "target", t.target(), "targetType", t.targetType())).toList();
+        List<Map<String, Object>> predicates = executedQuery.predicates().stream().map(p ->
+                Map.<String, Object>of("variable", p.variable(), "field", p.field(),
+                        "compare", p.compare().name(), "value", p.value())).toList();
+        List<Map<String, Object>> comparisons = executedQuery.fieldComparisons().stream().map(c ->
+                Map.<String, Object>of("leftVariable", c.leftVariable(), "leftField", c.leftField(),
+                        "compare", c.compare().name(), "rightVariable", c.rightVariable(),
+                        "rightField", c.rightField())).toList();
+        List<Map<String, Object>> negated = executedQuery.negatedTraversals().stream().map(n ->
+                Map.<String, Object>of("source", n.source(),
+                        "relationshipType", n.relationshipType(), "direction", n.direction().name(),
+                        "targetType", n.targetType(), "operator", "NOT_EXISTS_DIRECT")).toList();
+        List<Map<String, Object>> projections = executedQuery.projections().stream().map(p ->
+                Map.<String, Object>of("variable", p.variable(), "field", p.field(),
+                        "alias", p.alias())).toList();
+
+        Map<String, Object> queryProof = new LinkedHashMap<>();
+        queryProof.put("rootType", executedQuery.rootType());
+        queryProof.put("schemaVersion", executedQuery.schemaVersion());
+        queryProof.put("traversals", traversals);
+        queryProof.put("predicates", predicates);
+        queryProof.put("fieldComparisons", comparisons);
+        queryProof.put("negatedTraversals", negated);
+        queryProof.put("projections", projections);
+        if (executedQuery.selection() != null) {
+            var selection = executedQuery.selection();
+            queryProof.put("selection", Map.of(
+                    "onePerGroupBy", selection.onePerGroupBy(),
+                    "orderBy", selection.orderBy().stream().map(sort ->
+                            Map.<String, Object>of("alias", sort.alias(), "descending", sort.descending())).toList(),
+                    "random", selection.random(), "limit", selection.limit()));
+        }
+
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("rootEntityIds", requestedRoots.stream().sorted().toList());
         attributes.put("validatedGraphAnswerRows", project(response));
+        attributes.put("validatedGraphQuery", Map.copyOf(queryProof));
         attributes.put("readAtEpochSecond", response.getRetrievedAt().getSeconds());
         attributes.put("readAtNano", response.getRetrievedAt().getNanos());
         attributes.put("truncated", false);
@@ -57,24 +120,9 @@ public final class GraphEvidenceProjector {
             case DECIMAL -> cell.getDecimal();
             case BOOLEAN -> cell.getBoolean();
             case KIND_NOT_SET -> null;
-            case ITEMS -> throw new IllegalStateException("Query result rows must contain scalar fields");
+            case ITEMS -> cell.getItems().getValuesList().stream()
+                    .map(GraphEvidenceProjector::value).toList();
         };
     }
 
-    /** Legacy explorer projection; unrelated callers can continue to use it. */
-    public static List<Map<String, Object>> project(InternalGraph graph) {
-        Map<String, InternalGraphNode> nodes = graph.getNodesList().stream()
-                .collect(Collectors.toMap(InternalGraphNode::getNodeId, Function.identity()));
-        return graph.getRelationshipsList().stream().map(edge -> {
-            InternalGraphNode from = nodes.get(edge.getFromNodeId());
-            InternalGraphNode to = nodes.get(edge.getToNodeId());
-            if (from == null || to == null)
-                throw new IllegalStateException("Graph relationship references an unresolved node: "
-                        + edge.getRelationshipId());
-            return Map.<String, Object>of("subjectName", from.getLabel(),
-                    "subjectType", from.getNodeType().name(), "subjectAttributes", from.getAttributesMap(),
-                    "relationship", edge.getRelationshipType().name(), "objectName", to.getLabel(),
-                    "objectType", to.getNodeType().name(), "objectAttributes", to.getAttributesMap());
-        }).toList();
-    }
 }
