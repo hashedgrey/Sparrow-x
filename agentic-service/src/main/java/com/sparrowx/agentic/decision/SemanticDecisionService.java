@@ -1,5 +1,7 @@
 package com.sparrowx.agentic.decision;
 
+import com.sparrowx.agentic.trace.MissionDecisionTraceContext;
+import com.sparrowx.agentic.trace.MissionTracePublisher;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceAnswer;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionAnswer;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionQuestion;
@@ -78,6 +80,7 @@ public final class SemanticDecisionService {
             systemOneUnavailable = true;
         }
 
+        MissionDecisionTraceContext.votes(bounded, request.questions(), request.minimumSystemOneConfidence());
         Set<String> fieldsToEscalate = escalationFields(request, bounded);
         if (systemOneUnavailable) {
             fieldsToEscalate = new LinkedHashSet<>(fieldsToEscalate);
@@ -86,7 +89,8 @@ public final class SemanticDecisionService {
         }
 
         if (fieldsToEscalate.isEmpty()) {
-
+            MissionDecisionTraceContext.event("JEV_ACCEPTED", "Jev resolved bounded fields",
+                    Map.of("fieldCount", Integer.toString(request.questions().size()), "decision", "ACCEPTED"));
             return Result.systemOneOnly(
                     bounded
             );
@@ -103,6 +107,9 @@ public final class SemanticDecisionService {
             );
         }
 
+        MissionDecisionTraceContext.event("LLM_ESCALATION", "Escalate unresolved fields",
+                Map.of("reasonCode", systemOneUnavailable ? "JEV_UNAVAILABLE" : "LOW_CONFIDENCE_OR_UNRESOLVED",
+                        "escalatedCount", Integer.toString(fieldsToEscalate.size())));
         LlmDecisionEngine.Result llmResult =
                 escalate(
                         new LlmDecisionEngine.Request(
@@ -157,6 +164,7 @@ public final class SemanticDecisionService {
         long started = System.nanoTime();
         try {
             DecisionResponse response = systemOne.evaluate(state, questions);
+            MissionDecisionTraceContext.votes(response, questions, minimumConfidence);
             for (var entry : questions.entrySet()) {
                 DecisionAnswer answer = response.answers().get(entry.getKey());
                 DecisionQuestion question = entry.getValue();
@@ -165,31 +173,144 @@ public final class SemanticDecisionService {
                         || confidence(answer) < minimumConfidence) {
                     LOG.info("semantic.system1.unresolved operation={} field={} elapsedMs={}",
                             operation, entry.getKey(), elapsed(started));
+                    MissionDecisionTraceContext.event("JEV_UNRESOLVED", "Jev bounded check unresolved",
+                            Map.of("field", entry.getKey(), "threshold", Double.toString(minimumConfidence),
+                                    "decision", "UNRESOLVED"));
                     return Optional.empty();
                 }
             }
             LOG.info("semantic.system1.resolved operation={} provider={} elapsedMs={}",
                     operation, response.provider(), elapsed(started));
+            MissionDecisionTraceContext.event("JEV_ACCEPTED", "Jev bounded check accepted",
+                    Map.of("fieldCount", Integer.toString(questions.size()), "decision", "ACCEPTED"));
             return Optional.of(response);
         } catch (RuntimeException ex) {
             LOG.warn("semantic.system1.failed operation={} elapsedMs={} type={}",
                     operation, elapsed(started), ex.getClass().getSimpleName());
+            MissionDecisionTraceContext.event("JEV_UNAVAILABLE", "Jev execution unavailable",
+                    Map.of("reasonCode", ex.getClass().getSimpleName()));
             return Optional.empty();
         }
     }
 
     public LlmDecisionEngine.Result escalate(LlmDecisionEngine.Request request) {
         long started = System.nanoTime();
-        try {
+        MissionTracePublisher.Span llmSpan = MissionDecisionTraceContext.begin(
+                "LLM_GENERATION", "Generate structured LLM decision",
+                Map.of("fieldCount", Integer.toString(request.fieldsToResolve().size()),
+                        "stage", request.metadata().getOrDefault("component", "semantic")));
+        try (var child = MissionDecisionTraceContext.parent(llmSpan == null ? null : llmSpan.id())) {
             LlmDecisionEngine.Result result = llm.evaluate(request);
+            // Safe output summary for UI inspection. Full prompts and generated JSON
+            // must remain behind a separate permission-controlled debug endpoint.
+            MissionDecisionTraceContext.event("LLM_RESULT", "Structured LLM response received",
+                    Map.of("provider", result.response().provider(),
+                            "model", result.response().model(),
+                            "route", result.routeKey(),
+                            "fieldCount", Integer.toString(request.fieldsToResolve().size()),
+                            "outcome", result.output() == null ? "MISSING" : "RECEIVED"));
             LOG.info("semantic.llm.complete operation={} route={} elapsedMs={}",
                     request.operationId(), result.routeKey(), elapsed(started));
+            if (result.output() != null) {
+                MissionDecisionTraceContext.proposal(result.output().get("status"), result.output().get("nextAction"));
+            }
+            if (llmSpan != null) llmSpan.finish("SUCCEEDED", "");
             return result;
         } catch (RuntimeException e) {
+            if (llmSpan != null) llmSpan.finish("FAILED", e.getClass().getSimpleName());
             LOG.warn("semantic.llm.failed operation={} elapsedMs={} type={}",
                     request.operationId(), elapsed(started), e.getClass().getSimpleName());
             throw e;
         }
+    }
+
+    /**
+     * Jev-first routing for STRUCTURED decisions with a mixture of bounded and
+     * generative fields.  The current SystemOneDecisionClient supports noul,
+     * choice, and score, not arbitrary JSON structures.  Jev therefore judges
+     * bounded enum fields first; the LLM supplies any open-text, arrays, nested
+     * graph joins, and other fields the System-1 protocol cannot produce.
+     *
+     * If Jev fails, times out, returns malformed choices or lacks confidence,
+     * tryBounded returns empty and the LLM receives the original request.
+     * The proposal is advice, not authorization or verified evidence.
+     */
+    public LlmDecisionEngine.Result escalateAfterJev(LlmDecisionEngine.Request request) {
+        Objects.requireNonNull(request, "request");
+        Map<String, DecisionQuestion> boundedQuestions = enumQuestions(request);
+        if (boundedQuestions.isEmpty()) {
+            LOG.info("semantic.jev.unexpressible operation={} reason=no-bounded-schema-fields",
+                    request.operationId());
+            MissionDecisionTraceContext.event("LLM_ESCALATION", "LLM needed for unbounded output",
+                    Map.of("reasonCode", "NO_BOUNDED_FIELDS"));
+            return escalate(request);
+        }
+        Map<String, Object> state = new LinkedHashMap<>(request.state());
+        Optional<DecisionResponse> answer = tryBounded(
+                state, boundedQuestions, 0.80d, request.operationId() + ":jev-preflight");
+        if (answer.isEmpty()) {
+            LOG.info("semantic.jev.escalation operation={} reason=unavailable-or-uncertain",
+                    request.operationId());
+            MissionDecisionTraceContext.event("LLM_ESCALATION", "Jev requires LLM fallback",
+                    Map.of("reasonCode", "UNAVAILABLE_OR_UNCERTAIN"));
+            return escalate(request);
+        }
+        Map<String, String> choices = new LinkedHashMap<>();
+        for (String field : boundedQuestions.keySet()) {
+            DecisionAnswer resolved = answer.get().answers().get(field);
+            if (resolved instanceof ChoiceAnswer choice) {
+                choices.put(field, choice.choice());
+            }
+        }
+        if (choices.isEmpty()) return escalate(request);
+        // Do not force the generative LLM to copy a wrong Jev suggestion.
+        // The consuming component still validates the complete output.
+        state.put("jevFirstPass", Map.copyOf(choices));
+        state.put("jevFirstPassInstruction", "Jev made the following bounded suggestions. "
+                + "Use them if consistent with the complete task and evidence; "
+                + "otherwise correct them. Produce ALL required fields, "
+                + "including unbounded structures that Jev cannot generate.");
+        Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
+        metadata.put("routing", "jev-first-llm-for-generative-fields");
+        LOG.info("semantic.jev.resolved operation={} fields={} provider={} continuing=generative-llm",
+                request.operationId(), choices.keySet(), answer.get().provider());
+        MissionDecisionTraceContext.event("LLM_CONTINUATION", "Jev resolved choices; LLM fills generative fields",
+                Map.of("reasonCode", "GENERATIVE_FIELDS_REQUIRED", "fieldCount", Integer.toString(choices.size())));
+        return escalate(new LlmDecisionEngine.Request(
+                request.missionId(), request.operationId(), request.idempotencyKey(),
+                request.task(), Map.copyOf(state), request.fieldsToResolve(),
+                request.outputSchema(), request.maxOutputTokens(), request.temperature(),
+                Map.copyOf(metadata)));
+    }
+
+    /** Only ask Jev closed-form questions it actually supports. */
+    private static Map<String, DecisionQuestion> enumQuestions(LlmDecisionEngine.Request request) {
+        Object raw = request.outputSchema().get("properties");
+        if (!(raw instanceof Map<?, ?> properties)) return Map.of();
+        Map<String, DecisionQuestion> questions = new LinkedHashMap<>();
+        for (String field : request.fieldsToResolve().stream().sorted().toList()) {
+            Object shape = properties.get(field);
+            if (!(shape instanceof Map<?, ?> property) || !(property.get("enum") instanceof List<?> values)
+                    || values.size() < 2 || values.size() > 24
+                    || !"string".equals(property.get("type"))) continue;
+            Map<String, String> options = new LinkedHashMap<>();
+            boolean valid = true;
+            for (Object value : values) {
+                if (!(value instanceof String str) || str.isBlank() || options.containsKey(str)) {
+                    valid = false;
+                    break;
+                }
+                options.put(str, str);
+            }
+            if (valid) {
+                questions.put(field,
+                        new com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceQuestion(
+                                "For the supplied task and state, choose the most appropriate value of '"
+                                        + field + "'. Do not guess when the evidence is insufficient. "
+                                        + request.task(), Map.copyOf(options)));
+            }
+        }
+        return Map.copyOf(questions);
     }
 
     private static boolean validAnswer(DecisionQuestion question, DecisionAnswer answer) {

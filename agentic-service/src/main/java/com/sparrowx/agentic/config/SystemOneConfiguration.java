@@ -10,13 +10,13 @@ import org.springframework.core.env.Environment;
 
 import java.util.Locale;
 
-/** Select one System-1 provider. LlmConfig owns the semantic router bean. */
+/** Jev is the default bounded semantic engine; failures are escalated by SemanticDecisionService. */
 @Configuration(proxyBeanMethods = false)
 public final class SystemOneConfiguration {
 
     @Bean
     public SystemOneDecisionClient systemOneDecisionClient(Environment environment) {
-        String provider = environment.getProperty("sparrowx.agentic.system-one.provider", "laya")
+        String provider = environment.getProperty("sparrowx.agentic.system-one.provider", "jev")
                 .trim().toLowerCase(Locale.ROOT);
         return switch (provider) {
             case "laya" -> laya(environment);
@@ -34,7 +34,6 @@ public final class SystemOneConfiguration {
         String baseUrl = environment.getProperty(
                 "sparrowx.agentic.system-one.laya.base-url", "http://localhost:8088");
         String apiKey = environment.getProperty("sparrowx.agentic.system-one.laya.api-key", "");
-        // The Laya container chooses its running model; this is response metadata only.
         String model = environment.getProperty(
                 "sparrowx.agentic.system-one.laya.model", "convaiinnovations/laya-typed-decisions");
         return new HttpSystemOneDecisionClient("laya", Protocol.LAYA, baseUrl, apiKey, model);

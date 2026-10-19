@@ -32,8 +32,8 @@ public final class DownstreamClientsConfig {
             @Value("${sparrowx.internal.deadlines.company-graph:5s}")
             Duration companyGraphDeadline,
 
-            @Value("${sparrowx.internal.deadlines.graph-expansion:5s}")
-            Duration expansionDeadline
+            @Value("${sparrowx.internal.deadlines.ontology:5s}")
+            Duration ontologyDeadline
     ) {
         return new InternalClientResiliencePolicy(
                 Map.of(
@@ -42,12 +42,12 @@ public final class DownstreamClientsConfig {
                         searchDeadline,
 
                         InternalClientResiliencePolicy.Operation
-                                .READ_INTERNAL_COMPANY_GRAPH,
+                                .EXECUTE_INTERNAL_GRAPH_QUERY,
                         companyGraphDeadline,
 
                         InternalClientResiliencePolicy.Operation
-                                .EXPAND_INTERNAL_COMPANY_GRAPH,
-                        expansionDeadline
+                                .DESCRIBE_INTERNAL_COMPANY_GRAPH,
+                        ontologyDeadline
                 )
         );
     }
