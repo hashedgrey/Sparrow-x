@@ -1,6 +1,10 @@
 package com.sparrowx.agentic.mission.evidence;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -65,9 +69,32 @@ public record EvidenceRef(
         return value == null ? "" : value;
     }
 
+    /** Prevent mutation of nested evidence after provenance has been recorded. */
     private static Map<String, Object> immutableStruct(Map<String, Object> value) {
-        return value == null
-                ? Map.of()
-                : Collections.unmodifiableMap(new LinkedHashMap<>(value));
+        if (value == null) return Map.of();
+        Map<String, Object> copy = new LinkedHashMap<>();
+        value.forEach((key, item) -> copy.put(key, immutableValue(item)));
+        // Unlike Map.copyOf, permits legitimate null projected graph values.
+        return Collections.unmodifiableMap(copy);
+    }
+
+    private static Object immutableValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<Object, Object> copy = new LinkedHashMap<>();
+            map.forEach((key, item) -> copy.put(key, immutableValue(item)));
+            return Collections.unmodifiableMap(copy);
+        }
+        if (value instanceof List<?> values) {
+            List<Object> copy = new ArrayList<>(values.size());
+            values.forEach(item -> copy.add(immutableValue(item)));
+            return Collections.unmodifiableList(copy);
+        }
+        if (value instanceof Set<?> values) {
+            Set<Object> copy = new LinkedHashSet<>();
+            values.forEach(item -> copy.add(immutableValue(item)));
+            return Collections.unmodifiableSet(copy);
+        }
+        if (value instanceof byte[] bytes) return bytes.clone();
+        return value;
     }
 }

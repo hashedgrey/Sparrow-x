@@ -20,7 +20,7 @@
 
     <properties>
         <java.version>24</java.version>
-        <embabel-agent.version>1.5.2</embabel-agent.version>
+        <embabel-agent.version>1.5.3</embabel-agent.version>
         <temporal.version>1.37.0</temporal.version>
         <grpc.version>1.83.1</grpc.version>
         <protobuf.version>3.25.1</protobuf.version>
