@@ -4,6 +4,7 @@ import buildingblocks.core.queries.QueryHandler;
 import com.sparrowx.internal.data.postgres.entities.*;
 import com.sparrowx.internal.data.postgres.repositories.*;
 import org.springframework.stereotype.Component;
+import com.sparrowx.internal.data.neo4j.Neo4jCompanyGraphRootScanner;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -30,14 +31,8 @@ public class SearchInternalEntitiesQueryHandler
             "INTERNAL_GRAPH_NODE_TYPE_DOCUMENT";
     private static final String TYPE_RUNBOOK =
             "INTERNAL_GRAPH_NODE_TYPE_RUNBOOK";
-    private static final String TYPE_ONBOARDING_PATH =
-            "INTERNAL_GRAPH_NODE_TYPE_ONBOARDING_PATH";
-    private static final String TYPE_ONBOARDING_TASK =
-            "INTERNAL_GRAPH_NODE_TYPE_ONBOARDING_TASK";
     private static final String TYPE_ENGINEER =
             "INTERNAL_GRAPH_NODE_TYPE_ENGINEER";
-    private static final String TYPE_PERMISSION =
-            "INTERNAL_GRAPH_NODE_TYPE_PERMISSION";
 
     private final ModuleJpaRepository moduleRepository;
     private final TeamJpaRepository teamRepository;
@@ -47,6 +42,7 @@ public class SearchInternalEntitiesQueryHandler
     private final EngineerJpaRepository engineerRepository;
     private final SearchInternalEntitiesQueryValidator validator;
     private final EngineerTeamMembershipJpaRepository membershipRepository;
+    private final Neo4jCompanyGraphRootScanner rootScanner;
     public SearchInternalEntitiesQueryHandler(
             ModuleJpaRepository moduleRepository,
             TeamJpaRepository teamRepository,
@@ -55,6 +51,7 @@ public class SearchInternalEntitiesQueryHandler
             RunbookJpaRepository runbookRepository,
             EngineerJpaRepository engineerRepository,
             EngineerTeamMembershipJpaRepository membershipRepository,
+            Neo4jCompanyGraphRootScanner rootScanner,
             SearchInternalEntitiesQueryValidator validator
     ) {
         this.moduleRepository = moduleRepository;
@@ -64,6 +61,7 @@ public class SearchInternalEntitiesQueryHandler
         this.runbookRepository = runbookRepository;
         this.engineerRepository = engineerRepository;
         this.membershipRepository = membershipRepository;
+        this.rootScanner = java.util.Objects.requireNonNull(rootScanner, "rootScanner");
         this.validator = validator;
     }
 
@@ -73,6 +71,15 @@ public class SearchInternalEntitiesQueryHandler
     ) {
         validator.validate(query);
 
+        // Discovery modes are protocol controls, not ordinary attribute filters.
+        // Reject unknown controls rather than silently executing legacy search.
+        if (query.filters() != null && query.filters().containsKey("rootDiscoveryMode")) {
+            String discoveryMode = query.filters().get("rootDiscoveryMode");
+            if ("TYPE_SCAN".equals(discoveryMode)) return typeScan(query);
+            if ("GRAPH_SCHEMA".equals(discoveryMode)) return graphSearch(query);
+            throw new IllegalArgumentException("Unsupported graph root discovery mode");
+        }
+
         var searchText = normalize(query.query());
         var allowedTypes = normalizeAllowedTypes(query.allowedNodeTypes());
         var limit = normalizeLimit(query.limit());
@@ -80,13 +87,9 @@ public class SearchInternalEntitiesQueryHandler
         var results = new ArrayList<InternalEntitySearchResult>();
 
         if (shouldSearch(allowedTypes, TYPE_MODULE)) {
-            String moduleSearchText = removeTypeHint(searchText, "module");
-
             moduleRepository
-                    .searchByTenantIdAndText(query.tenantId(), moduleSearchText)
-                    .forEach(module ->
-                            results.add(toResult(module, moduleSearchText))
-                    );
+                    .searchByTenantIdAndText(query.tenantId(), searchText)
+                    .forEach(module -> results.add(toResult(module, searchText)));
         }
 
         if (shouldSearch(allowedTypes, TYPE_TEAM)) {
@@ -214,18 +217,31 @@ public class SearchInternalEntitiesQueryHandler
         );
     }
 
-    private String removeTypeHint(String query, String typeHint) {
-        if (isBlank(query)) {
-            return "";
-        }
+    /** Generic, ontology-validated CompanyNode scan. No hardcoded TEAM route. */
+    private SearchInternalEntitiesResult typeScan(SearchInternalEntitiesQuery query) {
+        if (!"*".equals(query.query()) || !isBlank(query.rootEntityId())
+                || query.depth() != 0 || query.allowedNodeTypes() == null
+                || query.allowedNodeTypes().size() != 1 || query.filters().size() != 1)
+            throw new IllegalArgumentException("Invalid TYPE_SCAN request");
+        var found = rootScanner.typeScan(query.tenantId(), query.actorId(),
+                query.allowedNodeTypes().getFirst(), normalizeLimit(query.limit()));
+        return new SearchInternalEntitiesResult(found.results(), false,
+                found.exhaustive() ? List.of() : List.of("Graph root type scan is truncated"),
+                found.exhaustive());
+    }
 
-        return String.join(
-                " ",
-                List.of(normalize(query).split("\\s+"))
-                        .stream()
-                        .filter(token -> !token.equals(typeHint))
-                        .toList()
-        );
+    /** Graph-grounded lexical search for any node type in the observed ontology. */
+    private SearchInternalEntitiesResult graphSearch(SearchInternalEntitiesQuery query) {
+        if (isBlank(query.query()) || "*".equals(query.query())
+                || !isBlank(query.rootEntityId()) || query.depth() != 0
+                || query.filters().size() != 1)
+            throw new IllegalArgumentException("Invalid GRAPH_SCHEMA root search request");
+        var found = rootScanner.search(query.tenantId(), query.actorId(),
+                normalizeAllowedTypes(query.allowedNodeTypes()), query.query(),
+                normalizeLimit(query.limit()), query.includeFuzzyMatches());
+        return new SearchInternalEntitiesResult(found.results(), isAmbiguous(found.results()),
+                found.exhaustive() ? List.of() : List.of("Graph root discovery is incomplete"),
+                found.exhaustive());
     }
 
     private InternalEntitySearchResult toResult(
@@ -390,12 +406,20 @@ public class SearchInternalEntitiesQueryHandler
 
 
 
+    private static final String LEGACY_TYPE_PREFIX = "INTERNAL_GRAPH_NODE_TYPE_";
+
     private boolean shouldSearch(
             Set<String> allowedTypes,
             String nodeType
     ) {
-        return allowedTypes.isEmpty()
-                || allowedTypes.contains(nodeType);
+        // Wire enum types are decoded to short names (e.g. MODULE), while
+        // legacy Postgres results retain their prefixed enum identifiers.
+        // Accept both representations without changing the response schema.
+        if (allowedTypes.isEmpty() || allowedTypes.contains(nodeType)) {
+            return true;
+        }
+        return nodeType.startsWith(LEGACY_TYPE_PREFIX)
+                && allowedTypes.contains(nodeType.substring(LEGACY_TYPE_PREFIX.length()));
     }
 
     private boolean matchesRootScope(
@@ -416,8 +440,9 @@ public class SearchInternalEntitiesQueryHandler
             return true;
         }
 
-        return result.attributes() != null
-                && result.attributes().containsValue(rootEntityId);
+        // Arbitrary attribute equality does not establish entity association.
+        // Deeper graph relationships must be resolved by graph traversal, not guessed here.
+        return false;
     }
 
     private boolean matchesFilters(
@@ -547,7 +572,7 @@ public class SearchInternalEntitiesQueryHandler
             String value,
             String query
     ) {
-        return !isBlank(query) && normalize(value).contains(query);
+        return !isBlank(query) && normalize(value).contains(normalize(query));
     }
 
     private Set<String> normalizeAllowedTypes(
@@ -646,3 +671,4 @@ public class SearchInternalEntitiesQueryHandler
         return "text match";
     }
 }
+

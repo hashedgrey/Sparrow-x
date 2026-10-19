@@ -2,14 +2,16 @@
 
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
 
+    <!-- Colored IntelliJ console -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
             <pattern>
-                %d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} trace=%X{trace_id} span=%X{span_id} - %msg%n
+                %clr(%d{yyyy-MM-dd HH:mm:ss}){faint} %clr([%thread]){faint} %clr(%-5level) %clr(%logger{36}){cyan} %clr(trace=%X{trace_id} span=%X{span_id}){magenta} - %msg%n
             </pattern>
         </encoder>
     </appender>
 
+    <!-- Plain logs for files -->
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>logs/internal-service.log</file>
 
@@ -21,7 +23,7 @@
 
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
             <fileNamePattern>logs/internal-service.%d{yyyy-MM-dd}.log</fileNamePattern>
-            <maxHistory>7</maxHistory>
+            <maxHistory>2</maxHistory>
         </rollingPolicy>
     </appender>
 

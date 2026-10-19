@@ -2,7 +2,7 @@ package com.sparrowx.internal.grpc.graph;
 
 import buildingblocks.infrastructure.grpc.interceptors.GrpcAuthInterceptor;
 import buildingblocks.shared.context.AuthContext;
-import com.sparrowx.internal.data.neo4j.graph.Neo4jGraphQueryClient;
+import com.sparrowx.internal.data.neo4j.Neo4jGraphQueryClient;
 import io.grpc.Status;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;

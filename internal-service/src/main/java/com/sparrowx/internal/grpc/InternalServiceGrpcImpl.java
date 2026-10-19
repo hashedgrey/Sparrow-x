@@ -4,7 +4,7 @@ import buildingblocks.core.commands.CommandBus;
 import buildingblocks.core.queries.QueryBus;
 import com.sparrowx.internal.exceptions.InternalServiceException;
 import com.sparrowx.internal.mappers.*;
-import com.sparrowx.internal.data.neo4j.graph.Neo4jGraphQueryClient;
+import com.sparrowx.internal.data.neo4j.Neo4jGraphQueryClient;
 import com.sparrowx.internal.grpc.graph.AuthenticatedGraphCaller;
 import com.sparrowx.internal.grpc.graph.GraphQueryGrpcMapper;
 import io.grpc.stub.StreamObserver;
@@ -370,6 +370,18 @@ public class InternalServiceGrpcImpl extends InternalServiceGrpc.InternalService
             );
 
             var query = InternalEntitySearchMapper.toSearchInternalEntitiesQuery(request);
+            // The graph-discovery path has full tenant graph visibility; require the
+            // same authenticated transport principal as typed graph query execution.
+            boolean graphDiscovery = request.getAllowedNodeTypeNamesCount() > 0
+                    || "GRAPH_SCHEMA".equals(request.getFiltersMap().get("rootDiscoveryMode"))
+                    || "TYPE_SCAN".equals(request.getFiltersMap().get("rootDiscoveryMode"));
+            if (graphDiscovery) {
+                var actor = graphCaller.verify(request.getContext());
+                query = new com.sparrowx.internal.features.searchinternalentities.SearchInternalEntitiesQuery(
+                        actor.tenantId(), actor.actorId(), query.requestId(), query.query(),
+                        query.allowedNodeTypes(), query.rootEntityId(), query.rootNodeType(),
+                        query.depth(), query.limit(), query.includeFuzzyMatches(), query.filters());
+            }
             var result = queryBus.dispatch(query);
 
             responseObserver.onNext(
@@ -454,6 +466,9 @@ public class InternalServiceGrpcImpl extends InternalServiceGrpc.InternalService
             StreamObserver<DescribeInternalCompanyGraphResponse> responseObserver
     ) {
         try {
+            // Graph ontology is tenant-scoped metadata; authorize as a graph read.
+            var graphActor = graphCaller.verify(request.getContext());
+            graphQueries.requireTenantGraphRead(graphActor.tenantId(), graphActor.actorId());
             var query = InternalGraphOntologyMapper.toQuery(request);
             var result = queryBus.dispatch(query);
 
