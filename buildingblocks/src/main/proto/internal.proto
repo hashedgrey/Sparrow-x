@@ -129,6 +129,7 @@ service InternalService {
 
 }
 
+
 message DescribeInternalCompanyGraphRequest {
   RequestContext context = 1;
 }
@@ -161,6 +162,44 @@ message ExecuteInternalCompanyGraphQueryRequest {
   repeated GraphQueryProjection projections = 6;
   int32 max_rows = 7;
   bool require_complete = 8;
+  // Observed ontology revision used to plan this query.
+  string schema_version = 9;
+  // Field-to-field equality/inequality, including root-to-result comparisons.
+  repeated GraphQueryFieldComparison field_comparisons = 10;
+  // A tenant-scoped, directly connected relationship must NOT exist.
+  // Sources must already be bound by the positive traversals (or root).
+  repeated GraphQueryNegatedTraversal negated_traversals = 11;
+  // Opt-in user-requested grouping, ordering and bounded sampling.
+  GraphQuerySelection selection = 12;
+}
+
+message GraphQuerySelection {
+  // Projected aliases; retain one candidate row per distinct tuple.
+  repeated string one_per_group_by = 1;
+  repeated GraphQuerySort order_by = 2;
+  bool random = 3;
+  // 0 means no user-requested limit. max_rows remains a safety limit.
+  int32 limit = 4;
+}
+
+message GraphQuerySort {
+  string alias = 1;
+  bool descending = 2;
+}
+
+message GraphQueryNegatedTraversal {
+  string source = 1;
+  string relationship_type = 2;
+  GraphQueryDirection direction = 3;
+  string target_type = 4;
+}
+
+message GraphQueryFieldComparison {
+  string left_variable = 1;
+  string left_field = 2;
+  GraphQueryCompare compare = 3; // EQ or NE only
+  string right_variable = 4;
+  string right_field = 5;
 }
 
 message GraphQueryTraverse {
@@ -751,6 +790,9 @@ message SearchInternalEntitiesRequest {
   // - "repository_id"
   // - "status"
   map<string, string> filters = 9;
+  // Graph goal path: ontology-validated type names, not protobuf enums.
+  repeated string allowed_node_type_names = 10;
+  string root_node_type_name = 11;
 }
 
 message SearchInternalEntitiesResponse {
@@ -761,6 +803,8 @@ message SearchInternalEntitiesResponse {
   bool ambiguous = 2;
 
   repeated string warnings = 3;
+  // Explicit search completeness. A capped result is NOT exhaustive.
+  bool exhaustive = 4;
 }
 
 message InternalEntitySearchResult {
@@ -804,6 +848,9 @@ message InternalEntitySearchResult {
   // - "document_external_ref"
   // - "runbook_document_id"
   map<string, string> attributes = 10;
+  // Authoritative names for dynamic graph types; old enums are legacy hints.
+  string node_type_name = 11;
+  string parent_node_type_name = 12;
 }
 
 // ========================
