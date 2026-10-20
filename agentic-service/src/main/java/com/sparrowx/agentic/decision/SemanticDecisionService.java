@@ -171,6 +171,13 @@ public final class SemanticDecisionService {
                 if (answer == null || !validAnswer(question, answer)
                         || !Double.isFinite(confidence(answer))
                         || confidence(answer) < minimumConfidence) {
+                    LOG.warn(
+                            "JEV rejected operation={} field={} answer={} threshold={}",
+                            operation,
+                            entry.getKey(),
+                            answer,
+                            minimumConfidence
+                    );
                     LOG.info("semantic.system1.unresolved operation={} field={} elapsedMs={}",
                             operation, entry.getKey(), elapsed(started));
                     MissionDecisionTraceContext.event("JEV_UNRESOLVED", "Jev bounded check unresolved",
@@ -179,6 +186,7 @@ public final class SemanticDecisionService {
                     return Optional.empty();
                 }
             }
+
             LOG.info("semantic.system1.resolved operation={} provider={} elapsedMs={}",
                     operation, response.provider(), elapsed(started));
             MissionDecisionTraceContext.event("JEV_ACCEPTED", "Jev bounded check accepted",

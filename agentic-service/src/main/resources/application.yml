@@ -175,6 +175,8 @@ management:
 
 
 logging:
+  level:
+    com.sparrowx.agentic.systemone.HttpSystemOneDecisionClient: DEBUG
   file:
     name: logs/agentic-service.log
 

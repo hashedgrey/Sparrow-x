@@ -19,6 +19,8 @@ import java.util.Objects;
 public final class HttpSystemOneDecisionClient
         implements SystemOneDecisionClient {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(HttpSystemOneDecisionClient.class);
     public enum Protocol {
         LAYA(
                 "/predict",
@@ -250,6 +252,10 @@ public final class HttpSystemOneDecisionClient
                             + " response does not contain an answers object"
             );
         }
+        if (answersMap.containsKey("selectionMode")) {
+            LOG.debug("JEV selectionMode raw={}",
+                    answersMap.get("selectionMode"));
+        }
 
         Map<String, DecisionAnswer> answers =
                 new LinkedHashMap<>();
@@ -447,13 +453,12 @@ public final class HttpSystemOneDecisionClient
             );
         }
 
-        double confidence =
-                optionalNumber(
-                        answer.get(
-                                "confidence"
-                        ),
-                        0.0d
-                );
+        Object rawConfidence = answer.get("confidence");
+
+        if (!(rawConfidence instanceof Number number)) {
+            throw new IllegalStateException("JEV choice confidence missing or invalid for " + name + ": " + answer);
+        }
+        double confidence = number.doubleValue();
 
         requireProbability(
                 confidence,
