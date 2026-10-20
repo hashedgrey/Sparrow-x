@@ -110,15 +110,17 @@ public final class EmbabelMissionEventBridge
         // Only action identifiers cross SSE; never serialize WorldState or action arguments.
         List<String> actions = event.getPlan().getActions().stream()
                 .map(action -> action.getName()).toList();
-        List<String> shown = actions.stream().limit(20).toList();
-        String actionsLabel = String.join(" -> ", shown);
+        EmbabelPlanProjection.Projection compact = EmbabelPlanProjection.from(actions);
         publishRuntime(event.getAgentProcess(), "EMBABEL_PLAN_FORMULATED", "Embabel plan formulated",
                 Map.of("goal", event.getPlan().getGoal().getName(),
                         "planIteration", Long.toString(iteration),
-                        "planActionCount", Integer.toString(actions.size()),
-                        "plannedActions", actionsLabel,
-                        "planTruncated", Boolean.toString(actions.size() > shown.size()
-                                || actionsLabel.length() > 2048),
+                        "planActionCount", Integer.toString(compact.actionCount()),
+                        // Compact IDs survive the SSE attribute bound; labels are rendered in the UI.
+                        "planActionIds", compact.actionIds(),
+                        // Backward-compatible qualified names for debugging/older UI versions.
+                        "plannedActions", compact.rawPlan(),
+                        "planTruncated", Boolean.toString(compact.actionsTruncated()),
+                        "planRawTruncated", Boolean.toString(compact.rawTruncated()),
                         "replanning", Boolean.toString(iteration > 1),
                         "plannerActual", event.getAgentProcess().getProcessOptions().getPlannerType().name()));
     }

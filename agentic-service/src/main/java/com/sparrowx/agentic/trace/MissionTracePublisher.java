@@ -32,7 +32,7 @@ public final class MissionTracePublisher {
             "decision", "tool", "service", "rootType", "goalStatus",
             "field", "choice", "vote", "confidence", "threshold", "reasonCode",
             "fieldCount", "escalatedCount", "stage", "planIteration", "goal",
-            "plannedActions", "observationCount", "evidenceCount", "attemptCount",
+            "plannedActions", "planActionIds", "planRawTruncated", "observationCount", "evidenceCount", "attemptCount",
             "addedObservations", "addedEvidence", "evidenceStateCount", "missingCount", "alternativeCount",
             "validation", "nextAction", "proposalStatus", "replanning",
             "plannerRequested", "plannerActual", "planActionCount", "planTruncated", "reviewIteration",
@@ -73,7 +73,8 @@ public final class MissionTracePublisher {
             if (SAFE_KEYS.contains(key) && value != null) {
                 String text = value.replaceAll("[\\r\\n\\t]", " ");
                 // Never forward prompts, query text, auth tokens, document contents or row bodies.
-                int cap = "plannedActions".equals(key) ? 2048 : 96;
+                int cap = "plannedActions".equals(key) ? 2048 :
+                        "planActionIds".equals(key) ? 768 : 96;
                 safe.put(key, text.substring(0, Math.min(cap, text.length())));
             }
         });
