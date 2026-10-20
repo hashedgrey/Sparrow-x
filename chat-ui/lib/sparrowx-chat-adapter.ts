@@ -80,7 +80,10 @@ function withTypedTrace(traces: SparrowTrace[], payload: Record<string, unknown>
   const safeAttributes: Record<string, string> = {};
   if (payload.attributes && typeof payload.attributes === "object") {
     for (const [key, value] of Object.entries(payload.attributes as Record<string, unknown>)) {
-      if (typeof value === "string" && key.length <= 64 && value.length <= 240) safeAttributes[key] = value;
+      // Qualified plan identifiers are diagnostic data, not content for the card itself.
+      // Compact IDs should always arrive intact; retain the bounded raw plan for inspection.
+      const limit = key === "planActionIds" ? 768 : key === "plannedActions" ? 2048 : 240;
+      if (typeof value === "string" && key.length <= 64 && value.length <= limit) safeAttributes[key] = value;
     }
   }
   const span: SparrowTrace = {

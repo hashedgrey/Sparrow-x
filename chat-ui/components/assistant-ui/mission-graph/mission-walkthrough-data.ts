@@ -16,7 +16,24 @@ export type EntitySummary = {
   names: string[];
   evidence?: number;
   searchSeen: boolean;
+  /** Cumulative capability attempts, including attempts with no service result event. */
+  attempts: number;
+  failedAttempts: number;
+  state: "not-started" | "failed" | "attempted" | "empty" | "found";
+  failureDetail?: string;
 };
+
+export type SourceSummary = {
+  /** Tool labels are derived from actual trace capabilities, never guessed providers. */
+  tools: string[];
+  attempts: number;
+  failures: number;
+  observedResults: number;
+};
+
+export const isFailureStatus = (raw?: string): boolean =>
+  /^(FAILED|FAILED_TERMINAL|ERROR|BLOCKED|REJECTED)$/.test(String(raw || "").toUpperCase());
+
 
 export const attrs = (t?: SparrowTrace): Record<string, string> =>
   (t?.attributes ?? {}) as Record<string, string>;
@@ -119,6 +136,53 @@ export function shortAction(name: string): string {
   return name.trim().split(".").at(-1) || name;
 }
 
+/** Stable UI labels for known Embabel @Action methods (not model-generated prose). */
+const EMBABEL_ACTION_LABELS: Record<string, string> = {
+  start: "Initialize",
+  reason: "Review",
+  searchEntities: "Search entities",
+  queryGraph: "Query graph",
+  retrieveDocuments: "Get documents",
+  complete: "Finalize",
+  interpret: "Interpret request",
+  plan: "Plan mission",
+  collectEvidence: "Collect evidence",
+};
+
+export type EmbabelPlanView = {
+  preview: string;
+  actions: { id: string; label: string }[];
+  total: number;
+  truncated: boolean;
+  rawPlan?: string;
+};
+
+/**
+ * Compact IDs take precedence over the old, potentially long qualified-name payload.
+ * Never collapse repeated actions: repeated review/replanning is real execution history.
+ * Plans containing more than the backend's emission limit explicitly report truncation.
+ */
+export function embabelPlanView(attributes: Record<string, string>): EmbabelPlanView {
+  const compact = attributes.planActionIds;
+  const raw = attributes.plannedActions;
+  const ids = compact ? compact.split(" > ").map(s => s.trim()).filter(Boolean) :
+    raw ? raw.split(" -> ").map(s => shortAction(s)).filter(Boolean) : [];
+  const actions = ids.slice(0, 20).map(id => ({
+    id,
+    label: EMBABEL_ACTION_LABELS[id] || id.replace(/([a-z])([A-Z])/g, "$1 $2"),
+  }));
+  const parsedTotal = Number(attributes.planActionCount);
+  const total = attributes.planActionCount && Number.isSafeInteger(parsedTotal) && parsedTotal >= actions.length
+    ? parsedTotal : actions.length;
+  const truncated = attributes.planTruncated === "true" || total > actions.length;
+  const previewItems = actions.slice(0, 4).map(a => a.label);
+  const hidden = total - previewItems.length;
+  const preview = previewItems.length
+    ? previewItems.join(" → ") + (hidden > 0 ? ` → +${hidden} more` : "")
+    : "No Embabel plan recorded for this step";
+  return { preview, actions, total, truncated, rawPlan: raw };
+}
+
 function numberField(value?: string): number | undefined {
   if (value == null || value.trim() === "") return undefined;
   const n = Number(value);
@@ -134,16 +198,32 @@ function parseNames(raw?: string): string[] {
   return raw.split(/[;,|]/).map(s => s.trim()).filter(s => s && !/^\d+$/.test(s)).slice(0, 6);
 }
 
-/** Only verified type/count values are present in current schema-v2 SSE. */
+/** Only verified counts/names from SSE are presented as results.
+ * A CAPABILITY_ATTEMPT is an attempt, never proof of successful retrieval.
+ * Evidence snapshots are absolute; subsequent deltas augment that snapshot.
+ */
 export function entitySummary(events: SparrowTrace[]): EntitySummary {
   let type: string | undefined;
   let roots: number | undefined;
   let results: number | undefined;
+  let verifiedRoots: number | undefined;
   let evidence: number | undefined;
   let searchSeen = false;
+  let attempts = 0;
+  let failedAttempts = 0;
+  let failureDetail: string | undefined;
   const names = new Set<string>();
+
   for (const e of events) {
     const a = attrs(e);
+    if (e.kind === "CAPABILITY_ATTEMPT" && a.capability === "internal.entities.search") {
+      searchSeen = true;
+      attempts++;
+      if (isFailureStatus(e.status)) {
+        failedAttempts++;
+        failureDetail = a.error || a.failureReason || a.errorMessage || e.message || undefined;
+      }
+    }
     if (e.kind === "INTSVC_SEARCH") {
       searchSeen = true;
       type = a.rootType || type;
@@ -152,11 +232,59 @@ export function entitySummary(events: SparrowTrace[]): EntitySummary {
       type = a.rootType || type;
       roots = numberField(a.rootCount) ?? roots;
     }
-    if (e.kind === "GRAPH_QUERY_RESULT") results = numberField(a.resultCount) ?? results;
+    if (e.kind === "GRAPH_QUERY_RESULT") {
+      results = numberField(a.resultCount) ?? results;
+      verifiedRoots = numberField(a.rootCount) ?? verifiedRoots;
+    }
     if (e.kind === "MISSION_EVIDENCE_SNAPSHOT") evidence = numberField(a.evidenceCount) ?? evidence;
-    for (const key of ["entityNames", "resolvedEntities", "entities"]) parseNames(a[key]).forEach(n => names.add(n));
+    if (e.kind === "MISSION_EVIDENCE_DELTA") {
+      const added = numberField(a.addedEvidence);
+      if (added !== undefined) evidence = (evidence ?? 0) + added;
+    }
+    for (const key of ["entityNames", "resolvedEntities", "entities"]) {
+      parseNames(a[key]).forEach(n => names.add(n));
+    }
   }
-  return { type, roots, results, evidence, searchSeen, names: [...names].slice(0, 6) };
+
+  const found = names.size > 0 || (results ?? 0) > 0 || (verifiedRoots ?? 0) > 0;
+  const state: EntitySummary["state"] = found ? "found" :
+    results === 0 ? "empty" :
+      attempts > 0 && failedAttempts === attempts ? "failed" :
+        searchSeen || type ? "attempted" : "not-started";
+
+  return {
+    type, roots, results, evidence, searchSeen, attempts, failedAttempts,
+    failureDetail, state, names: [...names].slice(0, 6),
+  };
+}
+
+/** Cumulative tool usage. "Observed result" means a result event was emitted;
+ * it does not imply that the tool returned a nonempty result set.
+ */
+export function sourceSummary(events: SparrowTrace[]): SourceSummary {
+  const tools = new Set<string>();
+  let attempts = 0;
+  let failures = 0;
+  let observedResults = 0;
+  const labels: Record<string, string> = {
+    "internal.entities.search": "Entity search",
+    "internal.company-graph.read": "Company graph",
+    "document.evidence.build": "Document evidence",
+  };
+
+  for (const trace of events) {
+    const a = attrs(trace);
+    if (trace.kind === "CAPABILITY_ATTEMPT") {
+      attempts++;
+      if (isFailureStatus(trace.status)) failures++;
+      if (a.capability) tools.add(labels[a.capability] || shortAction(a.capability));
+    }
+    if (trace.kind === "GRAPH_QUERY_RESULT" || trace.kind === "INTSVC_SEARCH" ||
+      trace.kind === "INTSVC_GRAPH" || trace.kind === "MISSION_EVIDENCE_DELTA") {
+      observedResults++;
+    }
+  }
+  return { tools: [...tools], attempts, failures, observedResults };
 }
 
 /** Short, factual per-event summaries; no "reasoning" or prompts are invented. */

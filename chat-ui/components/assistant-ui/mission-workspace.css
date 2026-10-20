@@ -1,0 +1,70 @@
+/* A stable command bar shared by empty and active threads; light even inside a dark shell. */
+.sp-mission-shell { background: #f5f8fc; color: #17263b; }
+.sp-workspace-toolbar {
+  position: relative; z-index: 15; flex: 0 0 auto; display: grid;
+  grid-template-columns: minmax(220px, .95fr) minmax(340px, 2fr) minmax(140px, .5fr);
+  gap: clamp(12px, 2vw, 30px); align-items: center; width: 100%; min-height: 104px;
+  padding: 12px 22px; border-bottom: 1px solid #dae4f0;
+  background: linear-gradient(100deg, #fff 0%, #f9fbff 100%);
+}
+.sp-workspace-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.sp-workspace-logo { display: grid; width: 37px; height: 37px; flex: 0 0 auto; place-items: center; border-radius: 11px; color: #2469db; background: #eaf2ff; }
+.sp-workspace-identity-text { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.sp-workspace-title-line { display: flex; gap: 9px; align-items: center; min-width: 0; }
+.sp-workspace-title-line strong { white-space: nowrap; font-size: 16px; font-weight: 740; letter-spacing: -.02em; }
+.sp-workspace-planner { border-radius: 5px; background: #eaf2ff; color: #245ac0; padding: 3px 7px; font-size: 10px; font-weight: 700; }
+.sp-workspace-mission-id { display: block; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #7b8da8; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sp-workspace-composer { width: 100%; min-width: 0; max-width: 880px; justify-self: stretch; color: #17263b; }
+.sp-workspace-composer > * { width: 100%; max-width: 100%; }
+.sp-workspace-right { display: flex; align-items: center; justify-content: flex-end; gap: 12px; white-space: nowrap; }
+.sp-metrics-wrap { position: relative; }
+.sp-metrics-trigger { display: inline-flex; gap: 7px; align-items: center; padding: 7px 9px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: #405570; font: inherit; cursor: pointer; font-size: 12px; font-weight: 700; }
+.sp-metrics-trigger:hover, .sp-metrics-trigger:focus-visible { background: #edf4ff; border-color: #d6e7fc; }
+.sp-workspace-state { background: #e8f2ff; color: #235cc3; padding: 6px 9px; border-radius: 7px; font-size: 11px; font-weight: 700; }
+.sp-workspace-state-fail { background: #fff0ed; color: #c83e33; }
+.sp-metrics-popover { display: none; position: absolute; right: 0; top: 100%; pointer-events: auto; width: 255px; padding: 10px 14px; border: 1px solid #dbe6f4; border-radius: 12px; box-shadow: 0 14px 40px #182c4c26; background: #fff; color: #243856; font-size: 12px; }
+.sp-metrics-wrap:hover .sp-metrics-popover, .sp-metrics-wrap:focus-within .sp-metrics-popover, .sp-metrics-popover.sp-metrics-visible { display: block; }
+.sp-metrics-popover-heading { display: flex; align-items: center; gap: 7px; font-weight: 750; padding-bottom: 9px; margin-bottom: 5px; border-bottom: 1px solid #ebf0f6; }
+.sp-metrics-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 5px 1px; color: #6a7d98; }
+.sp-metrics-row strong { color: #233853; font-variant-numeric: tabular-nums; font-weight: 730; }
+.sp-workspace-view { min-height: 0; flex: 1 1 auto; width: 100%; overflow-y: auto; padding: 12px; }
+.sp-workspace-view > .sp-walkthrough { height: min(800px, calc(100dvh - 137px)); }
+.sp-mission-shell .sp-walkthrough { border-top: 0; border-radius: 0 0 14px 14px; grid-template-rows: minmax(0, 1fr); height: min(780px, calc(100dvh - 140px)); min-height: 520px; }
+.sp-mission-shell .sp-walkthrough > .sp-head { display: none; }
+.sp-mission-shell .sp-walkthrough .sp-body { min-height: 0; }
+.sp-workspace-thread { min-height: 0; padding: 12px 12px 24px; }
+.sp-workspace-thread .sp-walkthrough { margin-top: 8px; }
+.sp-workspace-note { color: #8493a8; padding: 7px 20px; font-size: 10px; text-align: center; }
+@media (max-width: 1050px) {
+  .sp-workspace-toolbar { grid-template-columns: 210px minmax(230px, 1fr) 132px; gap: 10px; padding-inline: 12px; }
+  .sp-workspace-logo { display: none; }
+  .sp-workspace-title-line strong { font-size: 13px; }
+  .sp-workspace-planner { display: none; }
+}
+@media (max-width: 720px) {
+  .sp-workspace-toolbar { grid-template-columns: 1fr auto; grid-template-rows: auto auto; gap: 8px; }
+  .sp-workspace-composer { grid-column: 1 / -1; grid-row: 2; }
+  .sp-workspace-right { grid-column: 2; grid-row: 1; }
+  .sp-workspace-title-line strong { font-size: 14px; }
+  .sp-mission-shell .sp-walkthrough { min-height: 610px; height: calc(100dvh - 200px); }
+}
+
+/* Dashboard is the only visible thread surface. The page itself never scrolls. */
+.sp-mission-shell {
+  width: 100%; height: 100%; min-height: 0; min-width: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.sp-mission-shell .sp-workspace-toolbar { min-height: 88px; flex: 0 0 auto; }
+.sp-mission-shell .sp-workspace-view {
+  flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  width: 100%; padding: 10px; overflow: hidden;
+}
+.sp-mission-shell .sp-workspace-view > .sp-walkthrough { flex: 1 1 0; height: 100%; min-height: 0; max-height: none; }
+.sp-mission-shell .sp-workspace-message-source {
+  position: fixed; left: -99999px; top: -99999px; height: 1px; width: 1px;
+  opacity: 0; pointer-events: none; overflow: hidden;
+}
+@media (max-width: 720px) {
+  .sp-mission-shell .sp-workspace-toolbar { min-height: 110px; }
+  .sp-mission-shell .sp-workspace-view { padding: 5px; }
+}

@@ -1,54 +1,78 @@
 "use client";
 
-import { AuiIf, ThreadPrimitive } from "@assistant-ui/react";
-import type { FC } from "react";
+import { ThreadPrimitive, useAuiState } from "@assistant-ui/react";
+import { useMemo, type FC } from "react";
 import { CloneThreadShell } from "./clone-thread-shell";
-import { Composer, ThreadSuggestions } from "./composer";
+import { Composer } from "./composer";
 import { ChatMessage } from "./message";
+import { MissionTraceDashboard } from "./mission-graph/mission-trace-dashboard";
+import { MissionWorkspaceHeader, MissionWorkspaceProvider, ResetMissionHeader, useMissionWorkspace } from "./mission-workspace";
+import "./mission-workspace.css";
 
-export const Arrow: FC = () => {
-    return (
-        <CloneThreadShell>
-            <ThreadPrimitive.Root className="flex h-full flex-col overflow-hidden bg-[#fdfcfc] text-[#1f1f1f] dark:bg-[#0c0c0c] dark:text-[#e3e3e3]">
-                <AuiIf condition={(s) => s.thread.messages.length === 0}>
-                    <div className="relative flex grow flex-col">
-                        <div className="flex grow flex-col items-center justify-center px-4">
-                            <div className="flex w-full max-w-3xl flex-col">
-                                <h1 className="fade-in slide-in-from-bottom-3 motion-safe:animate-in fill-mode-both relative z-10 mb-6 text-center text-4xl font-normal text-[#1f1f1f] delay-500 duration-400 ease-[cubic-bezier(0.22,1,0.36,1)] dark:text-white">
-                                    What can Arrow help you find?
-                                </h1>
-                                <div className="relative">
-                                    <div
-                                        aria-hidden="true"
-                                        className="fade-in zoom-in-40 blur-in-[90px] motion-safe:animate-in fill-mode-both pointer-events-none absolute top-1/2 left-1/2 h-[260px] w-[680px] max-w-[92%] -translate-x-1/2 -translate-y-1/2 rounded-[140px] bg-[#a9d1fb]/60 blur-[90px] duration-1000 ease-[cubic-bezier(0.22,1,0.36,1)] dark:bg-[#1b2f9c]/50"
-                                    />
-                                    <div className="relative z-10">
-                                        <Composer />
-                                        <ThreadSuggestions />
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </AuiIf>
+/**
+ * Use the actual chat message renderer inside the Result step, rather than
+ * converting responses to strings. This preserves the same message content,
+ * attachments and assistant-ui actions (feedback, copy, regenerate) that the
+ * original chat displays, for every message in the current thread.
+ */
+const ResultConversation: FC = () => (
+  <ThreadPrimitive.Viewport
+    turnAnchor="top"
+    autoScroll={false}
+    scrollToBottomOnRunStart={false}
+    className="sp-result-chat-viewport"
+    aria-label="Conversation history"
+  >
+    <ThreadPrimitive.Messages components={{ Message: ChatMessage }} />
+  </ThreadPrimitive.Viewport>
+);
 
-                <AuiIf condition={(s) => s.thread.messages.length > 0}>
-                    <ThreadPrimitive.Viewport
-                        turnAnchor="top"
-                        autoScroll={false}
-                        scrollToBottomOnRunStart={false}
-                        className="flex grow flex-col overflow-y-scroll pt-12"
-                    >
-                        <ThreadPrimitive.Messages components={{ Message: ChatMessage }} />
-                        <ThreadPrimitive.ViewportFooter className="sticky bottom-0 mt-auto flex w-full flex-col items-center gap-1.5 bg-[#fdfcfc] px-4 pb-3 dark:bg-[#0c0c0c]">
-                            <Composer />
-                            <p className="text-center text-xs text-[#5e6063] dark:text-[#9aa0a6]">
-                                Arrow can make mistakes. Check important info..
-                            </p>
-                        </ThreadPrimitive.ViewportFooter>
-                    </ThreadPrimitive.Viewport>
-                </AuiIf>
-            </ThreadPrimitive.Root>
-        </CloneThreadShell>
-    );
+const WorkspaceScreen: FC = () => {
+  const messages = useAuiState(s => s.thread.messages);
+  const { mission } = useMissionWorkspace();
+  const lastAssistantIndex = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.role === "assistant") return i;
+    }
+    return -1;
+  }, [messages]);
+
+  return <>
+    <MissionWorkspaceHeader composer={<Composer />} />
+    {messages.length === 0 && <ResetMissionHeader />}
+    <main className="sp-workspace-view" aria-label="Mission workspace">
+      <MissionTraceDashboard
+        metadata={mission?.metadata}
+        traces={mission?.traces ?? []}
+        conversation={messages.length > 0 ? <ResultConversation /> : undefined}
+        hasConversation={messages.length > 0}
+        showEmpty
+        publishSummary={false}
+      />
+    </main>
+    {/* The latest ChatMessage stays mounted so existing trace/metadata emission
+        continues publishing run state even when the Result tab isn't selected. */}
+    {lastAssistantIndex >= 0 && (
+      <ThreadPrimitive.Viewport
+        autoScroll={false}
+        className="sp-workspace-message-source"
+        aria-hidden="true"
+      >
+        <ThreadPrimitive.MessageByIndex
+          index={lastAssistantIndex}
+          components={{ Message: ChatMessage }}
+        />
+      </ThreadPrimitive.Viewport>
+    )}
+  </>;
 };
+
+export const Arrow: FC = () => (
+  <CloneThreadShell>
+    <ThreadPrimitive.Root className="sp-mission-shell flex h-full min-h-0 flex-col overflow-hidden">
+      <MissionWorkspaceProvider>
+        <WorkspaceScreen />
+      </MissionWorkspaceProvider>
+    </ThreadPrimitive.Root>
+  </CloneThreadShell>
+);
