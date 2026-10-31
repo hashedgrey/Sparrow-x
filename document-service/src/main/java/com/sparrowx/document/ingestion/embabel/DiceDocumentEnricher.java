@@ -9,16 +9,20 @@ import com.embabel.dice.common.SourceAnalysisContext;
 import com.embabel.dice.pipeline.PropositionPipeline;
 import com.embabel.dice.pipeline.PropositionResults;
 import com.embabel.dice.projection.graph.GraphProjectionService;
+import com.embabel.dice.proposition.Proposition;
 import com.embabel.dice.proposition.PropositionRepository;
 import com.embabel.dice.provenance.UriLocator;
+import com.sparrowx.document.config.DiceIngestionProperties;
 import com.sparrowx.document.domain.valueobjects.DocumentId;
 import com.sparrowx.document.domain.valueobjects.FileName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.*;
+import java.util.concurrent.*;
 
 @Component
 public class DiceDocumentEnricher {
@@ -26,17 +30,6 @@ public class DiceDocumentEnricher {
     private static final Logger logger =
             LoggerFactory.getLogger(DiceDocumentEnricher.class);
 
-    /*
-     * Temporary local policy.
-     *
-     * 25% means:
-     *   6 chunks -> 1 failed chunk allowed
-     *   4 chunks -> 1 failed chunk allowed
-     *   3 chunks -> 0 failed chunks allowed
-     *
-     * We should move this into DiceIngestionProperties next.
-     */
-    private static final double MAX_FAILED_CHUNK_RATIO = 0.25d;
 
     private final PropositionPipeline propositionPipeline;
     private final PropositionRepository propositionRepository;
@@ -45,6 +38,9 @@ public class DiceDocumentEnricher {
     private final DataDictionary dataDictionary;
     private final EntityResolver entityResolver;
     private final Relations relations;
+    private final ExecutorService propositionPersistenceExecutor;
+    private final DiceIngestionProperties properties;
+    private final DiceResolutionLookupCache resolverLookupCache;
 
     public DiceDocumentEnricher(
             PropositionPipeline propositionPipeline,
@@ -54,7 +50,11 @@ public class DiceDocumentEnricher {
             @Qualifier("diceDataDictionary")
             DataDictionary dataDictionary,
             EntityResolver entityResolver,
-            Relations relations
+            Relations relations,
+            @Qualifier("dicePropositionPersistenceExecutor")
+            ExecutorService propositionPersistenceExecutor,
+            DiceIngestionProperties properties,
+            DiceResolutionLookupCache resolverLookupCache
     ) {
         this.propositionPipeline =
                 Objects.requireNonNull(
@@ -97,6 +97,11 @@ public class DiceDocumentEnricher {
                         relations,
                         "relations must not be null"
                 );
+
+        this.propositionPersistenceExecutor = Objects.requireNonNull(
+                propositionPersistenceExecutor, "propositionPersistenceExecutor must not be null");
+        this.properties = Objects.requireNonNull(properties, "properties must not be null");
+        this.resolverLookupCache = Objects.requireNonNull(resolverLookupCache, "resolverLookupCache");
     }
 
     public DiceEnrichmentResult enrich(
@@ -124,10 +129,16 @@ public class DiceDocumentEnricher {
         }
 
         logger.info(
-                "Starting DICE enrichment tenantId={} documentId={} chunks={}",
+                "Starting DICE enrichment tenantId={} documentId={} chunks={} "
+                        + "entityVectorSearchEnabled={} entityTenantFilterEnabled={} "
+                        + "extractionThreads={} persistenceThreads={}",
                 tenantId,
                 documentId.value(),
-                chunks.size()
+                chunks.size(),
+                properties.entityVectorSearchEnabled(),
+                properties.entityTenantFilterEnabled(),
+                properties.extractionThreads(),
+                properties.propositionPersistenceThreads()
         );
 
         SourceAnalysisContext context =
@@ -155,11 +166,20 @@ public class DiceDocumentEnricher {
                                 )
                         );
 
-        PropositionResults results =
-                propositionPipeline.process(
-                        chunks,
-                        context
-                );
+        // DICE resolves entities serially after extraction on the calling thread.
+        // Search cache exists for only this document/tenant and is discarded even on failure.
+        // No repository writes occur in this scoped phase.
+        PropositionResults results;
+        long semanticStartNanos = System.nanoTime();
+        try (var scope = resolverLookupCache.openScope(tenantId, documentId.value())) {
+            results = propositionPipeline.process(chunks, context);
+        }
+        logger.info("DICE semantic pipeline complete tenantId={} documentId={} "
+                        + "durationMs={} propositions={} vectorSearchEnabled={}",
+                tenantId, documentId.value(),
+                (System.nanoTime() - semanticStartNanos) / 1_000_000,
+                results.getTotalPropositions(),
+                properties.entityVectorSearchEnabled());
 
         List<String> failedChunkIds =
                 results.getFailedChunkIds();
@@ -193,7 +213,7 @@ public class DiceDocumentEnricher {
          * enrichment as partial.
          */
         if (successfulChunkCount <= 0
-                || failedChunkRatio > MAX_FAILED_CHUNK_RATIO) {
+                || failedChunkRatio > properties.maxFailedChunkRatio()) {
 
             throw new IllegalStateException(
                     "DICE proposition extraction exceeded failure threshold "
@@ -284,55 +304,29 @@ public class DiceDocumentEnricher {
 
 
         /*
-         * 2. Proposition persistence
+         * 2. Proposition persistence.
+         *
+         * The DICE repository embeds proposition text and performs deduplication,
+         * provenance and graph writes in each save(). There is no bulk-save SPI
+         * in PropositionRepository. A small dedicated pool overlaps independent
+         * saves without bypassing the repository's invariants.
+         *
+         * Never fan out an active caller transaction across threads.
          */
         long propositionPersistStart = System.nanoTime();
+        List<Proposition> canonical = persistPropositions(propsToSave, documentId.value());
 
-        var canonical = new java.util.ArrayList<com.embabel.dice.proposition.Proposition>();
-
-        int index = 0;
-
-        for (var proposition : propsToSave) {
-
-            long singleStart = System.nanoTime();
-
-            var saved =
-                    propositionRepository.save(
-                            proposition
-                    );
-
-            long singleMillis =
-                    (System.nanoTime() - singleStart) / 1_000_000;
-
-            logger.info(
-                    "DICE proposition save "
-                            + "index={} propositionId={} durationMs={}",
-                    index,
-                    proposition.getId(),
-                    singleMillis
-            );
-
-            canonical.add(saved);
-            index++;
-        }
-
-        var persisted =
-                com.embabel.dice.proposition.PropositionPersistenceResult.of(
-                        propsToSave,
-                        canonical
-                );
+        var persisted = com.embabel.dice.proposition.PropositionPersistenceResult.of(
+                propsToSave, canonical);
 
         long propositionPersistMillis =
                 (System.nanoTime() - propositionPersistStart) / 1_000_000;
-
         logger.info(
-                "DICE proposition persistence complete "
-                        + "documentId={} propositions={} durationMs={}",
-                documentId.value(),
-                propsToSave.size(),
-                propositionPersistMillis
-        );
-
+                "DICE proposition persistence complete documentId={} propositions={} "
+                        + "durationMs={} maxConcurrency={}",
+                documentId.value(), propsToSave.size(), propositionPersistMillis,
+                TransactionSynchronizationManager.isActualTransactionActive()
+                        ? 1 : properties.propositionPersistenceThreads());
 
         /*
          * 3. Structural relationships
@@ -419,11 +413,106 @@ public class DiceDocumentEnricher {
         return enrichmentResult;
     }
 
+    /**
+     * Persist using the DICE SPI; preserve input order because the DICE
+     * persistence result and structural edge wiring are positional.
+     *
+     * On normal completion or a repository error, all submitted saves are joined
+     * before returning or raising a failure. On interruption, pending futures
+     * are cancelled; cancellation of an in-flight database write is best effort.
+     */
+    private List<Proposition> persistPropositions(
+            List<Proposition> propositions, String documentId) {
+        if (propositions.isEmpty()) {
+            return List.of();
+        }
+
+        if (properties.propositionPersistenceThreads() == 1
+                || TransactionSynchronizationManager.isActualTransactionActive()) {
+            List<Proposition> saved = new ArrayList<>(propositions.size());
+            for (int i = 0; i < propositions.size(); i++) {
+                long started = System.nanoTime();
+                saved.add(propositionRepository.save(propositions.get(i)));
+                logSlowSave(documentId, i, started);
+            }
+            return saved;
+        }
+
+        List<Future<PropositionSave>> futures = new ArrayList<>(propositions.size());
+        for (int i = 0; i < propositions.size(); i++) {
+            final int index = i;
+            final Proposition proposition = propositions.get(i);
+            futures.add(propositionPersistenceExecutor.submit(() -> {
+                long started = System.nanoTime();
+                Proposition saved = propositionRepository.save(proposition);
+                long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+                return new PropositionSave(index, saved, elapsedMs);
+            }));
+        }
+
+        // Do not fail fast: joining every task prevents writes from continuing
+        // after the enclosing enrichment has already been reported as failed.
+        List<Proposition> ordered = new ArrayList<>(Collections.nCopies(propositions.size(), null));
+        RuntimeException firstFailure = null;
+        long maxSaveMs = 0;
+        long sumSaveMs = 0;
+        for (int i = 0; i < futures.size(); i++) {
+            try {
+                PropositionSave result = futures.get(i).get();
+                ordered.set(result.index(), result.proposition());
+                sumSaveMs += result.durationMs();
+                maxSaveMs = Math.max(maxSaveMs, result.durationMs());
+                if (result.durationMs() >= 3_000) {
+                    logger.warn("Slow DICE proposition save documentId={} index={} durationMs={}",
+                            documentId, result.index(), result.durationMs());
+                }
+            } catch (InterruptedException interrupted) {
+                futures.forEach(future -> future.cancel(true));
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                        "Interrupted while persisting DICE propositions for document " + documentId,
+                        interrupted);
+            } catch (ExecutionException failed) {
+                RuntimeException error = new IllegalStateException(
+                        "DICE proposition save failed documentId=" + documentId + " index=" + i,
+                        failed.getCause());
+                if (firstFailure == null) {
+                    firstFailure = error;
+                } else {
+                    firstFailure.addSuppressed(error);
+                }
+            }
+        }
+
+        if (firstFailure != null) {
+            throw firstFailure;
+        }
+        logger.info("DICE proposition save timing documentId={} totalSaveMs={} maxSaveMs={} count={}",
+                documentId, sumSaveMs, maxSaveMs, ordered.size());
+        return ordered;
+    }
+
+    private void logSlowSave(String documentId, int index, long started) {
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+        if (elapsedMs >= 3_000) {
+            logger.warn("Slow DICE proposition save documentId={} index={} durationMs={}",
+                    documentId, index, elapsedMs);
+        }
+    }
+
+    private record PropositionSave(int index, Proposition proposition, long durationMs) { }
+
     private void repairMissingUpdatedEntities(
             PropositionResults results,
             NamedEntityDataRepository namedEntityDataRepository
     ) {
         int missing = 0;
+        int overlapWithNew = 0;
+        int genuinelyMissing = 0;
+        Set<String> newlyMintedIds = new HashSet<>();
+        for (var created : results.newEntities()) {
+            newlyMintedIds.add(created.getId());
+        }
 
         for (var entity : results.updatedEntities()) {
 
@@ -434,13 +523,17 @@ public class DiceDocumentEnricher {
             }
 
             missing++;
+            boolean mintedInThisRun = newlyMintedIds.contains(entity.getId());
+            if (mintedInThisRun) {
+                overlapWithNew++;
+            } else {
+                genuinelyMissing++;
+            }
 
             logger.warn(
-                    "DICE classified entity as existing but repository "
-                            + "no longer contains it; materializing before "
-                            + "strict persist entityId={} name={}",
-                    entity.getId(),
-                    entity.getName()
+                    "DICE unresolved existing-entity lookup before persist "
+                            + "entityId={} name={} mintedInThisRun={}",
+                    entity.getId(), entity.getName(), mintedInThisRun
             );
 
             /*
@@ -456,10 +549,10 @@ public class DiceDocumentEnricher {
         logger.info(
                 "DICE entity persistence preflight "
                         + "newEntities={} updatedEntities={} "
-                        + "missingUpdatedEntities={}",
+                        + "missingUpdatedEntities={} mintedInThisRun={} genuinelyMissing={}",
                 results.newEntities().size(),
                 results.updatedEntities().size(),
-                missing
+                missing, overlapWithNew, genuinelyMissing
         );
     }
 

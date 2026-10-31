@@ -59,6 +59,14 @@ public class DiceIngestionConfiguration {
         );
     }
 
+    /** Dedicated bound for graph/proposition writes; not shared with LLM extraction. */
+    @Bean(name = "dicePropositionPersistenceExecutor", destroyMethod = "shutdown")
+    public ExecutorService dicePropositionPersistenceExecutor(
+            DiceIngestionProperties properties) {
+        return new ContextPropagatingExecutorService(
+                Executors.newFixedThreadPool(properties.propositionPersistenceThreads()));
+    }
+
     @Bean(destroyMethod = "close")
     public BatchedExtractionStrategy diceExtractionExecutionStrategy(
             @Qualifier("diceExtractionExecutor")
@@ -130,13 +138,23 @@ public class DiceIngestionConfiguration {
     }
 
     @Bean
-    public EntityResolver diceEntityResolver(
-            NamedEntityDataRepository namedEntityDataRepository
+    public DiceResolutionLookupCache diceResolutionLookupCache(
+            NamedEntityDataRepository namedEntityDataRepository,
+            DiceIngestionProperties properties
     ) {
-        return EscalatingEntityResolver.create(
-                namedEntityDataRepository,
-                null
-        );
+        return new DiceResolutionLookupCache(namedEntityDataRepository, properties);
+    }
+
+    @Bean
+    public EntityResolver diceEntityResolver(
+            DiceResolutionLookupCache resolverLookupCache,
+            DiceIngestionProperties properties
+    ) {
+        // Preserve vector matching by default. This optional switch can
+        // benchmark the expensive fallback only after checking match quality.
+        return properties.entityVectorSearchEnabled()
+                ? EscalatingEntityResolver.create(resolverLookupCache.repositoryView(), null)
+                : EscalatingEntityResolver.withoutVector(resolverLookupCache.repositoryView(), null);
     }
 
     @Bean
