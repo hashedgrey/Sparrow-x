@@ -17,6 +17,7 @@ public final class EmbeddingConfig {
         private String provider = "deterministic";
         private int dimension = 768;
         private boolean validateDimension = true;
+        private String queryInstruction = "";
 
         public String provider() {
             return provider;
@@ -28,6 +29,10 @@ public final class EmbeddingConfig {
 
         public boolean validateDimension() {
             return validateDimension;
+        }
+
+        public String queryInstruction() {
+            return queryInstruction;
         }
     }
 }

@@ -10,112 +10,87 @@ spring:
       idle-timeout: 30000
       max-lifetime: 1800000
       connection-timeout: 30000
-
-
+  ai:
+    model:
+      chat: none
+      embedding: openai
+    openai:
+      embedding:
+        base-url: ${DEEPINFRA_BASE_URL:https://api.deepinfra.com/v1/openai}
+        api-key: ${DEEPINFRA_API_KEY}
+        model: ${DOCUMENT_EMBEDDING_MODEL:Qwen/Qwen3-Embedding-8B}
+        encoding-format: float
 management:
   endpoints:
     web:
       exposure:
         include: health,info,prometheus
-
   endpoint:
     prometheus:
       access: unrestricted
-
   metrics:
     tags:
       service: document-service
-
   tracing:
     sampling:
       probability: ${TRACING_SAMPLE_PROBABILITY:1.0}
-
   otlp:
     tracing:
       endpoint: ${OTEL_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
-
   opentelemetry:
     resource-attributes:
       service.name: document-service
       service.version: ${SERVICE_VERSION:1.0.0}
       service.namespace: sparrowx
       deployment.environment: dev
-
-
 sparrowx:
   document:
-
-    minio:
-      enabled: ${DOCUMENT_MINIO_ENABLED:true}
-      endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
-      access-key: ${MINIO_ACCESS_KEY:minioadmin}
-      secret-key: ${MINIO_SECRET_KEY:minioadmin}
-      bucket-name: ${MINIO_BUCKET:sparrowx-documents}
-
     elasticsearch:
       enabled: ${DOCUMENT_ELASTICSEARCH_ENABLED:true}
       url: ${ELASTICSEARCH_URL:http://localhost:9200}
-      index-name: ${DOCUMENT_ELASTICSEARCH_INDEX:sparrowx-document-chunks}
-
     qdrant:
       enabled: ${DOCUMENT_QDRANT_ENABLED:true}
-      url: ${QDRANT_URL:http://localhost:6333}
-      collection-name: ${DOCUMENT_QDRANT_COLLECTION:sparrowx_document_chunks}
-      distance: ${DOCUMENT_QDRANT_DISTANCE:Cosine}
-
+      collection-name: ${DOCUMENT_QDRANT_COLLECTION:sparrowx_document_chunks_qwen3_8b}
     embedding:
       provider: ${DOCUMENT_EMBEDDING_ADAPTER:embabel}
-      dimension: ${DOCUMENT_EMBEDDING_DIMENSION:768}
-      validate-dimension: ${DOCUMENT_EMBEDDING_VALIDATE_DIMENSION:true}
-
-    rag:
-      max-chunk-size: ${DOCUMENT_RAG_MAX_CHUNK_SIZE:1200}
-      overlap-size: ${DOCUMENT_RAG_OVERLAP_SIZE:200}
-      embedding-batch-size: ${DOCUMENT_RAG_EMBEDDING_BATCH_SIZE:100}
-
-
+      dimension: ${DOCUMENT_EMBEDDING_DIMENSION:4096}
+      query-instruction: ${DOCUMENT_EMBEDDING_QUERY_INSTRUCTION:Given a user question, retrieve relevant document passages that answer the question}
 embabel:
   models:
-    # Independent selections.
-    default-llm: ${DOCUMENT_LLM_MODEL}
-    default-embedding-model: ${DOCUMENT_EMBEDDING_MODEL}
-
+    default-llm: ${DOCUMENT_LLM_MODEL:deepseek-v4-flash}
+    default-embedding-model: ${DOCUMENT_EMBEDDING_MODEL:Qwen/Qwen3-Embedding-8B}
   agent:
     platform:
       llm-operations:
         prompts:
           default-timeout: ${DOCUMENT_LLM_DEFAULT_TIMEOUT:120s}
-
         data-binding:
           max-attempts: ${DOCUMENT_LLM_BINDING_ATTEMPTS:1}
           fixed-backoff-millis: ${DOCUMENT_LLM_BINDING_BACKOFF_MS:1000}
-
+      models:
+        openai:
+          custom:
+            base-url: https://api.deepseek.com
+            api-key: ${DEEPSEEK_API_KEY}
+            models: ${DOCUMENT_LLM_MODEL:deepseek-flash}
     rag:
       graph:
         uri: ${NEO4J_URI:bolt://localhost:7687}
         username: ${NEO4J_USERNAME:neo4j}
         password: ${NEO4J_PASSWORD:password}
-
         content-element-index: ${DOCUMENT_GRAPH_CONTENT_INDEX:embabel_content_index}
         entity-index: ${DOCUMENT_GRAPH_ENTITY_INDEX:embabel_entity_index}
-
         content-element-full-text-index: ${DOCUMENT_GRAPH_CONTENT_FT_INDEX:embabel_content_fulltext_index}
         entity-full-text-index: ${DOCUMENT_GRAPH_ENTITY_FT_INDEX:embabel_entity_fulltext_index}
-
         chunk-node-name: ${DOCUMENT_GRAPH_CHUNK_NODE:Chunk}
         entity-node-name: ${DOCUMENT_GRAPH_ENTITY_NODE:Entity}
-
         max-chunk-size: ${DOCUMENT_RAG_MAX_CHUNK_SIZE:1200}
         overlap-size: ${DOCUMENT_RAG_OVERLAP_SIZE:200}
-
   dice:
     store:
       type: graph
-
       decay:
         enabled: false
-
-
 database:
   datasources:
     graph:

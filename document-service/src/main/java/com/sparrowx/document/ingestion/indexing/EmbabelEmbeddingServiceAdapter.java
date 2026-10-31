@@ -33,7 +33,14 @@ public class EmbabelEmbeddingServiceAdapter
 
     @Override
     public List<Float> embedQuery(String text) {
-        return embed(text);
+        String instruction = properties.queryInstruction();
+        if (instruction == null || instruction.isBlank()) {
+            return embed(text);
+        }
+        if (text == null || text.isBlank()) {
+            return embed(text); // Reuse existing blank-query validation.
+        }
+        return embed("Instruct: " + instruction.trim() + "\nQuery: " + text);
     }
 
     @Override
