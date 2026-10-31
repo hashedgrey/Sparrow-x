@@ -2,6 +2,7 @@
 
 import type { ChatModelAdapter } from "@assistant-ui/react";
 import { parseSseBlock } from "@/lib/ag-ui/bridge";
+import type { WalkthroughSignal } from "@/lib/walkthrough/types";
 
 export type SparrowProgress = {
   missionId: string; status: string; stageId: string; stageName: string;
@@ -28,6 +29,7 @@ export type SparrowMetadata = {
   progress?: SparrowProgress; traces: SparrowTrace[];
   executiveSummary?: string; citations: SparrowCitation[]; complete: boolean;
   timing: SparrowTiming; usage?: SparrowTokenUsage;
+  walkthroughSignals?: WalkthroughSignal[];
 };
 
 type AgUiEvent = { type: string; name?: string; value?: Record<string, unknown>; delta?: string; message?: string; code?: string; runId?: string };
@@ -122,6 +124,11 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
     let streamedAnswer = "";
     let finalAnswer = "";
     let complete = false;
+    const walkthroughSignals: WalkthroughSignal[] = [];
+    let signalSeq = 0;
+    const recordSignal = (signal: Omit<WalkthroughSignal, "seq">) => {
+      if (walkthroughSignals.length < 2000) walkthroughSignals.push({ seq: ++signalSeq, ...signal });
+    };
     let firstTokenMs: number | undefined;
     let totalMs: number | undefined;
     let chunks = 0;
@@ -141,7 +148,7 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
       content: (finalAnswer || streamedAnswer) ? [{ type: "text" as const, text: finalAnswer || streamedAnswer }] : [],
       metadata: { custom: { sparrowx: {
         missionId, missionStatus, missionPath, progress, traces, executiveSummary: executiveSummary || undefined,
-        citations, complete,
+        citations, complete, walkthroughSignals: walkthroughSignals.slice(),
         timing: { firstTokenMs, totalMs, chunks,
           tokensPerSecond: totalMs && usage.outputTokens ? usage.outputTokens / (totalMs / 1000) : undefined },
         usage,
@@ -182,15 +189,21 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
                   missionId = String(data.missionId || "") || missionId;
                   missionStatus = String(data.status || "RUNNING");
                   missionPath = String(data.path || "") || missionPath;
+                  recordSignal({ event: "mission" });
                 } else if (event.name === "sparrowx.progress") {
                   progress = data as unknown as SparrowProgress;
                   missionId = progress.missionId || missionId;
                   missionStatus = progress.status || missionStatus;
                   traces = withProgress(traces, progress);
+                  recordSignal({ event: "progress", stageId: progress.stageId, stepId: progress.stepId,
+                    status: progress.stepStatus, traceId: progress.traceId });
                 } else if (event.name === "sparrowx.trace") {
                   traces = withTypedTrace(traces, data);
+                  recordSignal({ event: "progress", kind: String(data.kind ?? ""),
+                    traceId: String(data.id ?? ""), status: String(data.status ?? "") });
                 } else if (event.name === "sparrowx.usage") {
                   const item = data as unknown as SparrowUsageEvent;
+                  if (!walkthroughSignals.some(s => s.event === "usage")) recordSignal({ event: "usage" });
                   if (item.kind === "LLM") {
                     usage.llmCalls++; usage.inputTokens += item.inputTokens ?? 0;
                     usage.cachedInputTokens += item.cachedInputTokens ?? 0;
@@ -212,6 +225,7 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
                   citations = result.citations ?? [];
                   finalAnswer = result.finalAnswer ?? streamedAnswer;
                   if (firstTokenMs === undefined && finalAnswer) firstTokenMs = performance.now() - start;
+                  recordSignal({ event: "result" });
                 }
                 break;
               }
@@ -219,11 +233,12 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
                 if (event.delta) {
                   if (firstTokenMs === undefined) firstTokenMs = performance.now() - start;
                   streamedAnswer += event.delta;
+                  if (!walkthroughSignals.some(s => s.event === "answer_delta")) recordSignal({ event: "answer_delta" });
                 }
                 break;
               }
-              case "RUN_FINISHED": complete = true; missionStatus = "COMPLETED"; totalMs = performance.now() - start; break;
-              case "RUN_ERROR": throw new Error(event.message || "SparrowX mission failed");
+              case "RUN_FINISHED": recordSignal({ event: "complete" }); complete = true; missionStatus = "COMPLETED"; totalMs = performance.now() - start; break;
+              case "RUN_ERROR": recordSignal({ event: "error" }); throw new Error(event.message || "SparrowX mission failed");
             }
             yield currentResult();
             if (complete) return;
