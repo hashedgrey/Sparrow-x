@@ -62,10 +62,10 @@ public class QdrantDocumentVectorRepository {
             String url = properties.url()
                     + "/collections/"
                     + properties.collectionName()
-                    + "/points/search";
+                    + "/points/query";
 
             Map<String, Object> body = new LinkedHashMap<>();
-            body.put("vector", queryVector);
+            body.put("query", queryVector);
             body.put("limit", safeLimit);
             body.put("with_payload", true);
             body.put("with_vector", false);
@@ -118,6 +118,9 @@ public class QdrantDocumentVectorRepository {
 
     private List<VectorSearchHit> parseHits(Map<?, ?> response) {
         Object result = response == null ? null : response.get("result");
+        if (result instanceof Map<?, ?> resultMap) {
+            result = resultMap.get("points");
+        }
 
         if (!(result instanceof List<?> results)) {
             return List.of();
