@@ -10,6 +10,11 @@ public final class DocumentClientMapper {
 
     private static final String AGENTIC_SERVICE = "agentic-service";
 
+    // Compatibility marker required by the shared GrpcAuthInterceptor.
+    // This marker is not proof of service identity; enforce service authentication
+    // separately at the trusted transport/security boundary.
+    private static final Metadata.Key<String> INTERNAL_CALL_HEADER =
+            Metadata.Key.of("x-internal-call", Metadata.ASCII_STRING_MARSHALLER);
 
     private static final Metadata.Key<String> USER_ID_HEADER =
             Metadata.Key.of("x-user-id", Metadata.ASCII_STRING_MARSHALLER);
@@ -58,10 +63,11 @@ public final class DocumentClientMapper {
         requireTenant(context.tenantId());
         requestId = requireText(requestId, "requestId");
 
-        // Do not fabricate roles or an internal authorization decision.
-        // DocSvc must authenticate the caller through its trusted transport/interceptor.
+        // Retain the shared interceptor contract without fabricating roles.
+        // x-internal-call is only a legacy compatibility marker, not authentication.
         Metadata metadata = new Metadata();
 
+        metadata.put(INTERNAL_CALL_HEADER, "true");
         metadata.put(TENANT_ID_HEADER, context.tenantId());
 
         putIfPresent(metadata, USER_ID_HEADER, context.userId());
