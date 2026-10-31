@@ -71,17 +71,21 @@ public class EmbabelRagConfiguration {
     @Setter
     @ConfigurationProperties(prefix = "sparrowx.document.rag")
     public static class RagProperties {
+        private int maxChunkSize = 1_200;
+        private int overlapSize = 200;
+        private int embeddingBatchSize = 100;
 
         public int maxChunkSize() {
-            return 1_500;
+            return maxChunkSize;
         }
 
         public int overlapSize() {
-            return 200;
+            return overlapSize;
         }
 
         public int embeddingBatchSize() {
-            return 100;
+            return embeddingBatchSize;
         }
     }
+
 }
