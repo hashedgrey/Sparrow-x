@@ -79,6 +79,10 @@ embabel:
         # internal enterprise data.
         capture-message-content: false
 
+  workflow:
+    visualizer:
+      enabled: true
+
 
 sparrowx:
   buildingblocks:
@@ -159,7 +163,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus
+        include: health,info,prometheus,embabel
 
   endpoint:
     prometheus:
