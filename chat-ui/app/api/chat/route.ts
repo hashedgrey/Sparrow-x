@@ -26,14 +26,20 @@ export async function POST(req: Request) {
     );
   }
 
+  // The AG-UI facade forwards bearer authorization to this endpoint. Preserve
+  // that header across the second proxy hop; never forward arbitrary cookies.
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  });
+  const authorization = req.headers.get("authorization");
+  if (authorization) headers.set("authorization", authorization);
+
   const upstream = await fetch(
       `${AGENTIC_SERVICE_URL}/api/assistant/missions/stream`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-        },
+        headers,
         body: JSON.stringify({
           query,
           tenantId: body.tenantId,
