@@ -323,7 +323,7 @@
   .sp-walkthrough .sp-result-document { padding: 16px; }
 }
 
-/* Result tab: render the actual assistant-ui thread, not a detached markdown copy. */
+/* Chat tab: render the actual assistant-ui thread, not a detached markdown copy. */
 .sp-mission-shell .sp-walkthrough .sp-result-chat-document {
   padding: 0;
   overflow: hidden;
@@ -332,7 +332,7 @@
   flex-direction: column;
   background: #fdfcfc;
 }
-.sp-mission-shell .sp-result-chat-viewport {
+.sp-mission-shell .sp-chat-viewport {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
@@ -350,14 +350,14 @@
 }
 /* Message components may contain their own mission cards. Those belong to the
    execution steps, not among conversational user/assistant messages. */
-.sp-mission-shell .sp-result-chat-viewport .sp-walkthrough {
+.sp-mission-shell .sp-chat-viewport .sp-walkthrough {
   display: none !important;
 }
 /* The viewport owns scrolling; the window and page remain fixed. */
 .sp-mission-shell .sp-result-pane,
 .sp-mission-shell .sp-result-chat-document { min-height: 0; }
 @container sp-walkthrough (max-width: 650px) {
-  .sp-mission-shell .sp-result-chat-viewport { padding: 10px 12px 25px; }
+  .sp-mission-shell .sp-chat-viewport { padding: 10px 12px 25px; }
 }
 
 /* Deterministic Embabel plan preview with inspectable original action order. */
@@ -370,3 +370,196 @@
 .sp-walkthrough .sp-plan-original { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px solid #e4def1; }
 .sp-walkthrough .sp-plan-original code { max-height: 90px; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; color: #52637b; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .sp-walkthrough .sp-plan-original em, .sp-walkthrough .sp-plan-warning { color: #a46123; font-size: 10px; }
+
+/* Chat-first workspace. Chat is a permanent, non-paginated navigation item;
+   workflow steps remain exclusively real Embabel mission events. */
+.sp-mission-shell .sp-walkthrough .sp-history { min-height: 0; }
+.sp-walkthrough .sp-chat-pin {
+  width: calc(100% - 14px); min-height: 43px; flex: 0 0 auto;
+  display: flex; align-items: center; gap: 11px;
+  margin: 9px 7px 3px; padding: 5px 11px;
+  border: 1px solid #dfe9f6; border-radius: 10px;
+  text-align: left; background: #f8fbff; color: #294666;
+  transition: background .15s ease, box-shadow .18s ease, border-color .15s ease;
+}
+.sp-walkthrough .sp-chat-pin:hover { background: #edf5ff; }
+.sp-walkthrough .sp-chat-pin-selected {
+  background: #eaf2ff; border-color: #bfd6ff; color: #1856be;
+}
+.sp-walkthrough .sp-chat-pin-icon {
+  flex: 0 0 27px; height: 27px; display: grid; place-items: center;
+  border-radius: 8px; background: #e5efff; color: #2669db;
+}
+.sp-walkthrough .sp-chat-pin-label { font-weight: 760; font-size: 12px; }
+.sp-walkthrough .sp-chat-pin-new {
+  margin-left: auto; color: #1656bc; background: #dceaff;
+  border-radius: 99px; padding: 3px 7px; font-size: 10px; font-weight: 700;
+  white-space: nowrap;
+}
+.sp-walkthrough .sp-chat-pin-attention {
+  border-color: #6aa0ff;
+  animation: sp-chat-ready-glow 1.8s ease-in-out infinite;
+}
+@keyframes sp-chat-ready-glow {
+  0%, 100% { box-shadow: 0 0 0 1px #93bbff66, 0 0 6px #4385f526; }
+  50% { box-shadow: 0 0 0 3px #93bbff99, 0 0 20px #4385f575; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-walkthrough .sp-chat-pin-attention { animation: none; box-shadow: 0 0 0 2px #7aaaff; }
+}
+/* Both surfaces stay mounted: no assistant-ui teardown when monitoring metrics. */
+.sp-mission-shell .sp-walkthrough .sp-main-stage {
+  position: relative; min-width: 0; min-height: 0; overflow: hidden;
+}
+.sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-chat-pane,
+.sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-content {
+  position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; min-width: 0;
+}
+.sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-pane-hidden {
+  visibility: hidden; pointer-events: none;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-pane {
+  display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  overflow: hidden; border-radius: 12px; border: 1px solid #d4e1f2;
+  background: #fdfcfc;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-thread {
+  flex: 1 1 0; display: flex; min-height: 0; min-width: 0; overflow: hidden;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-thread > * { min-width: 0; width: 100%; }
+.sp-mission-shell .sp-walkthrough .sp-chat-composer-dock {
+  flex: 0 0 auto; padding: 12px clamp(12px, 3vw, 40px) 20px;
+  background: linear-gradient(0deg, #fdfcfc 80%, #fdfcfc00);
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-composer-dock > * {
+  border: 1px solid #dce5f0; box-shadow: 0 4px 17px #1d3c6710;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-awaiting {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 9px;
+  width: min(800px, 100%); margin: 0 auto;
+  padding: 8px 22px; color: #426797; font-size: 12px;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-spinner { animation: sp-chat-rotate 1s linear infinite; }
+@keyframes sp-chat-rotate { to { transform: rotate(360deg); } }
+.sp-mission-shell .sp-walkthrough .sp-chat-empty {
+  justify-content: center; align-items: stretch;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-empty .sp-chat-thread {
+  position: absolute; inset: 0; visibility: hidden; pointer-events: none;
+}
+/* Empty Chat welcome: soft blue halo behind the centered composer only. */
+.sp-mission-shell .sp-walkthrough .sp-chat-empty::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(680px, 92%);
+  height: 260px;
+  border-radius: 140px;
+  transform: translate(-50%, -50%);
+  background: rgb(169 209 251 / 60%);
+  filter: blur(90px);
+  pointer-events: none;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-empty .sp-chat-welcome,
+.sp-mission-shell .sp-walkthrough .sp-chat-empty .sp-chat-composer-dock {
+  position: relative;
+  z-index: 1;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-welcome {
+  display: flex; flex-direction: column; flex: 0 0 auto;
+  align-items: center; justify-content: center; text-align: center;
+  gap: 11px; padding: 0 20px 3px; color: #3a64a2;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-welcome h2 {
+  margin: 0; color: #1c324d; font-size: clamp(20px, 3vw, 28px);
+  font-weight: 670; letter-spacing: -.025em;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-welcome p {
+  margin: 0; font-size: 12px; color: #8694a8;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-empty .sp-chat-composer-dock {
+  width: min(780px, 100%); align-self: center; padding-top: 28px;
+  padding-bottom: 0; background: none;
+}
+@media (max-width: 650px) {
+  .sp-mission-shell .sp-walkthrough .sp-chat-pin { width: calc(100% - 10px); margin: 3px 5px 1px; min-height: 36px; }
+  .sp-mission-shell .sp-walkthrough .sp-chat-pin-new { font-size: 9px; }
+  .sp-mission-shell .sp-walkthrough .sp-chat-composer-dock { padding: 7px 9px 12px; }
+}
+
+
+/* Refined execution timeline: four distinct responsibilities, not six overlapping metrics. */
+.sp-mission-shell .sp-walkthrough .sp-timeline-card-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.sp-walkthrough .sp-timeline-group-heading {
+  margin: 5px 0 2px; font-size: 10px; font-weight: 800; color: #60738e;
+  letter-spacing: .015em;
+}
+.sp-walkthrough .sp-timeline-vote {
+  padding: 5px 0; border-bottom: 1px solid #edf1f7;
+}
+.sp-walkthrough .sp-timeline-vote > div:first-child,
+.sp-walkthrough .sp-timeline-fact {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+  gap: 6px 14px; font-size: 11px; overflow-wrap: anywhere;
+}
+.sp-walkthrough .sp-timeline-vote > div:first-child strong,
+.sp-walkthrough .sp-timeline-fact strong { color: #334863; font-weight: 760; }
+.sp-walkthrough .sp-timeline-vote > div:first-child span,
+.sp-walkthrough .sp-timeline-fact span { color: #536882; }
+.sp-walkthrough .sp-timeline-vote-rejected {
+  margin-top: 3px; font-size: 10px; color: #ad6319; font-weight: 650;
+}
+.sp-walkthrough .sp-timeline-warning {
+  padding: 7px 9px; border: 1px solid #f2d4ac; border-radius: 7px;
+  background: #fff7eb; color: #9b5614; font-size: 11px;
+}
+@container sp-walkthrough (max-width: 940px) {
+  .sp-mission-shell .sp-walkthrough .sp-timeline-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+  }
+}
+@container sp-walkthrough (max-width: 650px) {
+  .sp-mission-shell .sp-walkthrough .sp-timeline-card-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(4, minmax(160px, auto));
+    overflow-y: auto;
+  }
+}
+
+/* Animated waiting indicator sits BELOW the Chat composer, never above it. */
+.sp-mission-shell .sp-walkthrough .sp-chat-awaiting {
+  flex: 0 0 auto;
+  justify-content: center;
+  min-height: 30px;
+  padding: 4px 12px 10px;
+  font-size: 11px;
+  color: #52739c;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-loading-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-loading-dots > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4c83d7;
+  animation: sp-chat-dot-pulse 1.15s ease-in-out infinite;
+}
+.sp-mission-shell .sp-walkthrough .sp-chat-loading-dots > span:nth-child(2) { animation-delay: 0.17s; }
+.sp-mission-shell .sp-walkthrough .sp-chat-loading-dots > span:nth-child(3) { animation-delay: 0.34s; }
+@keyframes sp-chat-dot-pulse {
+  0%, 65%, 100% { opacity: .35; transform: scale(.72); }
+  35% { opacity: 1; transform: scale(1.15); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-mission-shell .sp-walkthrough .sp-chat-loading-dots > span {
+    animation: none; opacity: .8; transform: none;
+  }
+}

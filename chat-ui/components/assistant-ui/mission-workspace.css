@@ -68,3 +68,53 @@
   .sp-mission-shell .sp-workspace-toolbar { min-height: 110px; }
   .sp-mission-shell .sp-workspace-view { padding: 5px; }
 }
+
+/* Chat-first workspace: the header contains mission identity and metrics only.
+   The assistant-ui composer lives inside the pinned Chat view. */
+.sp-mission-shell .sp-workspace-toolbar {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 76px;
+  gap: 16px;
+}
+.sp-mission-shell .sp-workspace-right { grid-column: 2; }
+.sp-mission-shell .sp-workspace-view { min-height: 0; overflow: hidden; }
+@media (max-width: 720px) {
+  .sp-mission-shell .sp-workspace-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto;
+    min-height: 72px;
+  }
+  .sp-mission-shell .sp-workspace-right { grid-row: 1; grid-column: 2; }
+}
+
+/* Compact the Mission walkthrough header and close the gap to the workspace. */
+.sp-mission-shell .sp-workspace-toolbar {
+  min-height: 58px;
+  padding: 5px 18px;
+}
+.sp-mission-shell .sp-workspace-view {
+  padding: 5px 6px 6px;
+}
+@media (max-width: 720px) {
+  .sp-mission-shell .sp-workspace-toolbar {
+    min-height: 58px;
+    padding: 5px 10px;
+  }
+  .sp-mission-shell .sp-workspace-view {
+    padding: 4px;
+  }
+}
+
+/* Successful stream termination is not a certification of the user's goal. */
+.sp-workspace-state-uncertified { background: #fff3df; color: #99540f; }
+
+/* Second, persistent workspace view: mission chat stays mounted while the graph is open. */
+.sp-workspace-tabs { display: flex; flex: 0 0 auto; align-items: stretch; height: 40px; gap: 4px; padding: 0 16px; background: #fff; border-bottom: 1px solid #dbe5f2; }
+.sp-workspace-tabs button { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 13px; background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 12px; font-weight: 650; color: #64748b; cursor: pointer; }
+.sp-workspace-tabs button:hover { color: #2358b4; background: #f4f8ff; }
+.sp-workspace-tabs button.sp-workspace-tab-active { color: #255fbf; border-bottom-color: #2a69d8; }
+.sp-workspace-tabs button:focus-visible { outline: 2px solid #2a69d8; outline-offset: -2px; }
+.sp-mission-shell .sp-workspace-tab-panel { display: none; min-height: 0; min-width: 0; flex: 1 1 0; }
+.sp-mission-shell .sp-workspace-tab-panel.sp-workspace-tab-visible { display: flex; flex-direction: column; }
+.sp-mission-shell .sp-workspace-tab-panel > .sp-walkthrough { min-height: 0; height: 100%; max-height: none; flex: 1 1 0; }
+.sp-mission-shell .sp-workspace-tab-panel > .sp-arch { flex: 1 1 0; min-height: 0; }

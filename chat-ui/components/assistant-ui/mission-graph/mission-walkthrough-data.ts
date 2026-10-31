@@ -107,16 +107,38 @@ export function buildWalkthrough(raw: SparrowTrace[]): WalkStep[] {
   const steps: WalkStep[] = anchorEvents.map(t => ({
     id: t.id, label: stepLabel(t), at: eventTime(t), anchor: t, traces: [],
   }));
+  const stepIndexById = new Map(steps.map((step, index) => [step.id, index] as const));
+  const eventsById = new Map(events.map(event => [event.id, event] as const));
+  const parentStepIndex = (event: SparrowTrace): number | undefined => {
+    let id = event.parentId;
+    const visited = new Set<string>();
+    while (id && !visited.has(id)) {
+      visited.add(id);
+      const stepIndex = stepIndexById.get(id);
+      if (stepIndex !== undefined) return stepIndex;
+      id = eventsById.get(id)?.parentId;
+    }
+    return undefined;
+  };
   for (const event of events) {
     let index = 0;
-    if (event.kind === "EMBABEL_PLAN_FORMULATED" || event.kind === "EMBABEL_PLANNING_READY") {
+    if (stepIndexById.has(event.id)) {
+      // An anchor owns its own event even if its span has an earlier parent.
+      index = stepIndexById.get(event.id)!;
+    } else if (event.kind === "EMBABEL_PLAN_FORMULATED" || event.kind === "EMBABEL_PLANNING_READY") {
       // A plan is formulated before the selected action executes.
       const next = steps.findIndex(s => s.at >= eventTime(event));
       index = next < 0 ? steps.length - 1 : next;
     } else {
-      for (let i = 1; i < steps.length; ++i) {
-        if (steps[i]!.at <= eventTime(event)) index = i;
-        else break;
+      const parentIndex = parentStepIndex(event);
+      if (parentIndex !== undefined) {
+        index = parentIndex;
+      } else {
+        // Unparented events keep their chronological placement.
+        for (let i = 1; i < steps.length; ++i) {
+          if (steps[i]!.at <= eventTime(event)) index = i;
+          else break;
+        }
       }
     }
     steps[index]!.traces.push(event);
@@ -291,7 +313,7 @@ export function sourceSummary(events: SparrowTrace[]): SourceSummary {
 export function eventDetails(t: SparrowTrace): string {
   const a = attrs(t);
   switch (t.kind) {
-    case "JEV_VOTE": return `${a.field || "vote"}: ${a.choice || a.vote || "—"} · ${a.confidence || "?"}/${a.threshold || "?"} · ${a.decision || ""}`;
+    case "JEV_VOTE": return `${a.field || "vote"}: ${a.choice || a.vote || "—"} · confidence ${a.confidence || "?"}, threshold ${a.threshold || "?"} · ${a.decision === "BELOW_THRESHOLD" ? "NOT ACCEPTED" : a.decision || "recorded"}`;
     case "JAVA_VALIDATION": return `${a.goalStatus || "—"} · next ${shortAction(a.nextAction || "NONE")} · ${a.validation || ""}`;
     case "GOAL_EVALUATED": return `${a.goalStatus || "—"} · next ${shortAction(a.nextAction || "NONE")}`;
     case "GRAPH_QUERY_BOUND": return `${a.rootType || "?"} · ${a.traversalCount || "0"} traversal · ${a.projectionCount || "0"} projection`;

@@ -4,15 +4,15 @@ import { useEffect, useMemo, useRef, useState, type FC, type ReactNode } from "r
 import {
   Activity, AlertCircle, ArrowRight, BrainCircuit, Check,
   ChevronLeft, ChevronRight, Circle, Clock3, Copy, Database,
-  FileSearch, FileText, Flag, GitBranch, History, Info, LoaderCircle, Route,
+  Flag, GitBranch, History, Info, LoaderCircle, MessageSquare, Route,
   Scale, Search, Target, type LucideIcon,
 } from "lucide-react";
 import type { SparrowMetadata, SparrowTrace } from "@/lib/sparrowx-chat-adapter";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  attrs, buildWalkthrough, embabelPlanView, entitySummary, eventDetails, eventTime,
-  firstKind, isFailureStatus, lastKind, normalizedTraces, shortAction, sourceSummary,
+  attrs, buildWalkthrough, embabelPlanView, eventDetails, eventTime,
+  firstKind, isFailureStatus, lastKind, normalizedTraces, shortAction,
 } from "./mission-walkthrough-data";
 import { usePublishMissionSummary, type MissionHeaderSnapshot } from "../mission-workspace";
 import "./mission-trace-dashboard.css";
@@ -21,16 +21,24 @@ type Props = {
   metadata?: SparrowMetadata;
   traces: SparrowTrace[];
   showEmpty?: boolean;
-  /** Live original ThreadPrimitive conversation, rendered only in the Result step. */
+  /** Always-mounted assistant-ui conversation; never clone or transform messages. */
   conversation?: ReactNode;
-  /** Whether there are existing messages in the current thread. */
+  /** The real assistant-ui composer, displayed in Chat rather than the toolbar. */
+  composer?: ReactNode;
   hasConversation?: boolean;
+  /** The parent controls the Chat/metrics switch for streamed missions. */
+  activeView?: "chat" | "metrics";
+  onViewChange?: (view: "chat" | "metrics") => void;
+  awaitingStream?: boolean;
+  /** True from submission through completion; drives dots below Chat composer. */
+  chatLoading?: boolean;
+  chatNeedsAttention?: boolean;
   /** Retained as a fallback for standalone uses of this dashboard. */
   result?: string;
   /** Only the hidden source dashboard publishes to the toolbar; avoids context loops. */
   publishSummary?: boolean;
 };
-const RESULT_ID = "__mission_result__";
+
 
 const MAX_STEPS = 11;
 const OMIT_FROM_DETAIL = new Set([
@@ -67,10 +75,24 @@ function statusKind(raw?: string): "success" | "error" | "active" | "neutral" {
   if (normalized === "RUNNING" || normalized === "PAUSED") return "active";
   return "neutral";
 }
+function capabilityLabel(capability?: string): string {
+  switch (capability) {
+    case "internal.entities.search": return "Find entities";
+    case "internal.company-graph.read": return "Query company graph";
+    case "document.evidence.build": return "Build document evidence";
+    default: return capability ? shortAction(capability) : "No action selected";
+  }
+}
+
+function emittedCount(value?: string): number | undefined {
+  if (value == null || value.trim() === "") return undefined;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : undefined;
+}
+
 function stepIcon(label: string): LucideIcon {
   if (label.startsWith("Review")) return GitBranch;
   if (label === "Find entities") return Search;
-  if (label === "Result") return FileText;
   if (label === "Complete") return Flag;
   if (label === "Start") return Route;
   return ArrowRight;
@@ -101,12 +123,20 @@ const StatusChip: FC<{ status?: string; label?: string }> = ({ status, label }) 
 );
 
 export const MissionTraceDashboard: FC<Props> = ({
-  metadata, traces, showEmpty = false, result = "", conversation,
-  hasConversation = false, publishSummary = true,
+  metadata, traces, showEmpty = false, result = "", conversation, composer,
+  hasConversation = false, activeView, onViewChange,
+  awaitingStream = false, chatLoading = false, chatNeedsAttention = false, publishSummary = true,
 }) => {
   const normalized = useMemo(() => normalizedTraces(traces), [traces]);
   const steps = useMemo(() => buildWalkthrough(traces), [traces]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [standaloneView, setStandaloneView] = useState<"chat" | "metrics">(showEmpty ? "chat" : "metrics");
+  const currentView = activeView ?? standaloneView;
+  const isChatSelected = currentView === "chat";
+  function chooseView(next: "chat" | "metrics") {
+    if (onViewChange) onViewChange(next);
+    else setStandaloneView(next);
+  }
   const [stepPage, setStepPage] = useState(0);
   const [explicitStepNavigation, setExplicitStepNavigation] = useState(false);
   const [compact, setCompact] = useState(false);
@@ -122,20 +152,12 @@ export const MissionTraceDashboard: FC<Props> = ({
     return () => observer.disconnect();
   }, []);
 
-  const isFinished = Boolean(metadata?.complete) || steps.some(s => s.anchor.kind === "MISSION_FINISH");
-  // Result is a presentation-only step, added after the actual 'Complete' event.
-  // It is never inserted into the trace/GOAP plan or selected automatically.
-  const hasResultStep = isFinished && steps.length > 0;
-  const historyItems = [
-    ...steps.map(s => ({ id: s.id, label: s.label, at: s.at, status: s.anchor.status })),
-    ...(hasResultStep ? [{ id: RESULT_ID, label: "Result", at: steps[steps.length - 1]!.at,
-      status: (hasConversation || result.trim()) ? "COMPLETED" : "PENDING" }] : []),
-  ];
-  const isResultSelected = hasResultStep && selectedId === RESULT_ID;
+  // Chat is always pinned outside the step list, never counted as a GOAP step.
+  const historyItems = steps.map(s => ({ id: s.id, label: s.label, at: s.at, status: s.anchor.status }));
   const stepsPerPage = compact ? 5 : MAX_STEPS;
-  const activeIndex = isResultSelected ? steps.length : selectedId === null ? Math.max(0, steps.length - 1) :
+  const activeIndex = selectedId === null ? Math.max(0, steps.length - 1) :
     Math.max(0, steps.findIndex(s => s.id === selectedId));
-  const step = isResultSelected ? undefined : steps[activeIndex];
+  const step = steps[activeIndex];
   useEffect(() => { setCopyState("idle"); }, [step?.id]);
   useEffect(() => {
     setSelectedId(null); setStepPage(0); setExplicitStepNavigation(false);
@@ -147,23 +169,32 @@ export const MissionTraceDashboard: FC<Props> = ({
     Math.min(Math.floor(activeIndex / stepsPerPage), maxStepPage);
   const visibleSteps = historyItems.slice(effectiveStepPage * stepsPerPage, (effectiveStepPage + 1) * stepsPerPage);
   const contextual = useMemo(() => steps.slice(0, Math.min(activeIndex + 1, steps.length)).flatMap(s => s.traces), [steps, activeIndex]);
-  const entities = useMemo(() => entitySummary(contextual), [contextual]);
-  const sources = useMemo(() => sourceSummary(contextual), [contextual]);
   const failedSteps = steps.filter(s => isFailureStatus(s.anchor.status)).length;
 
-  const plan = lastKind(step?.traces || [], "EMBABEL_PLAN_FORMULATED");
-  const review = lastKind(step?.traces || [], "JAVA_VALIDATION") || lastKind(step?.traces || [], "GOAL_EVALUATED");
-  const action = firstKind(step?.traces || [], "CAPABILITY_ATTEMPT");
-  const graphResult = lastKind(step?.traces || [], "GRAPH_QUERY_RESULT");
-  const vote = lastKind(step?.traces || [], "JEV_VOTE");
-  const llmStart = lastKind(step?.traces || [], "LLM_GENERATION");
-  const llmEnd = lastKind(step?.traces || [], "LLM_RESULT");
-  const llmProposal = lastKind(step?.traces || [], "LLM_PROPOSAL");
+  // Every metric below describes the selected step, not cumulative activity.
+  const stepTraces = step?.traces || [];
+  const plan = lastKind(stepTraces, "EMBABEL_PLAN_FORMULATED");
+  const validation = lastKind(stepTraces, "JAVA_VALIDATION");
+  const review = lastKind(stepTraces, "GOAL_EVALUATED") || validation;
+  const action = firstKind(stepTraces, "CAPABILITY_ATTEMPT");
+  const graphBound = lastKind(stepTraces, "GRAPH_QUERY_BOUND");
+  const graphResult = lastKind(stepTraces, "GRAPH_QUERY_RESULT");
+  const entitySearch = lastKind(stepTraces, "INTSVC_SEARCH");
+  const evidenceSnapshot = lastKind(stepTraces, "MISSION_EVIDENCE_SNAPSHOT");
+  const votes = stepTraces.filter(t => t.kind === "JEV_VOTE");
+  const unresolved = stepTraces.filter(t => t.kind === "JEV_UNRESOLVED");
+  const llmCalls = stepTraces.filter(t => t.kind === "LLM_GENERATION");
+  const llmResults = stepTraces.filter(t => t.kind === "LLM_RESULT");
+  const isReview = step?.anchor.kind === "REASON_LOOP";
+  const isAction = step?.anchor.kind === "CAPABILITY_ATTEMPT";
   const displayedPlan = plan || lastKind(contextual, "EMBABEL_PLAN_FORMULATED");
   const planView = embabelPlanView(attrs(displayedPlan));
+  const planIsPrevious = Boolean(displayedPlan && !plan);
   const planner = attrs(displayedPlan).plannerActual ||
     attrs(firstKind(normalized, "INTENT_SNAPSHOT")).plannerActual || "—";
   const missionStatus = String(metadata?.missionStatus || (metadata?.complete ? "COMPLETED" : showEmpty && !metadata?.missionId ? "READY" : "RUNNING"));
+  const finalGoalStatus = attrs(lastKind(normalized, "MISSION_FINISH") || lastKind(normalized, "GOAL_BLOCKED")).goalStatus;
+
   const startedAt = eventTime(normalized[0]);
   const endedAt = normalized.reduce((latest, trace) => {
     const end = typeof trace.endedAt === "number" ? trace.endedAt :
@@ -184,19 +215,20 @@ export const MissionTraceDashboard: FC<Props> = ({
   } : null, [metadata, planner, missionStatus, totalMs, failedSteps, normalized.length, startedAt, traces]);
   usePublishMissionSummary(publishSummary ? runSummary : null);
 
-  const rows = (step?.traces || []).filter(t => !OMIT_FROM_DETAIL.has(t.kind || ""));
+  const rows = stepTraces.filter(t => !OMIT_FROM_DETAIL.has(t.kind || ""));
   const aReview = attrs(review);
+  const aValidation = attrs(validation);
   const aAction = attrs(action);
-  const aVote = attrs(vote);
-  const aLlm = attrs(llmStart);
-  const aLlmEnd = attrs(llmEnd);
-  const aProposal = attrs(llmProposal);
   const aGraph = attrs(graphResult);
-  const stepEvidenceAdded = (step?.traces || []).reduce((total, t) => {
+  const aBound = attrs(graphBound);
+  const aSearch = attrs(entitySearch);
+  const aSnapshot = attrs(evidenceSnapshot);
+  const stepEvidenceAdded = stepTraces.reduce((total, t) => {
     if (t.kind !== "MISSION_EVIDENCE_DELTA") return total;
-    const n = Number(attrs(t).addedEvidence);
-    return total + (Number.isSafeInteger(n) && n >= 0 ? n : 0);
+    return total + (emittedCount(attrs(t).addedEvidence) ?? 0);
   }, 0);
+  const beforeEvidence = emittedCount(aSnapshot.evidenceCount);
+  const rejectedVotes = votes.filter(t => attrs(t).decision === "BELOW_THRESHOLD" || attrs(t).decision === "UNRESOLVED").length;
 
   async function copyEvents() {
     if (!step || typeof navigator === "undefined" || !navigator.clipboard) {
@@ -209,6 +241,7 @@ export const MissionTraceDashboard: FC<Props> = ({
     } catch { setCopyState("error"); }
   }
   function selectStep(id: string) {
+    chooseView("metrics");
     setSelectedId(id);
     setExplicitStepNavigation(false);
     setCopyState("idle");
@@ -236,10 +269,20 @@ export const MissionTraceDashboard: FC<Props> = ({
       <div className="sp-body">
         <aside className="sp-history sp-tone-blue" aria-label="Step history">
           <PanelHeading icon={History} title="Step history" meta={<span className="sp-count">{historyItems.length}</span>} />
+          <button type="button"
+            className={`sp-chat-pin ${isChatSelected ? "sp-chat-pin-selected" : ""} ${chatNeedsAttention && !isChatSelected ? "sp-chat-pin-attention" : ""}`}
+            aria-current={isChatSelected ? "page" : undefined}
+            aria-label={chatNeedsAttention && !isChatSelected ? "Chat, new result available" : "Chat"}
+            onClick={() => chooseView("chat")}
+          >
+            <span className="sp-chat-pin-icon" aria-hidden="true"><MessageSquare size={16} /></span>
+            <span className="sp-chat-pin-label">Chat</span>
+            {chatNeedsAttention && !isChatSelected ? <span className="sp-chat-pin-new">New result</span> : null}
+          </button>
           <div className="sp-step-list">
             {visibleSteps.map((s, offset) => {
               const index = effectiveStepPage * stepsPerPage + offset;
-              const selected = index === activeIndex;
+              const selected = !isChatSelected && index === activeIndex;
               const Icon = stepIcon(s.label);
               const outcome = statusKind(s.status);
               return (
@@ -268,154 +311,144 @@ export const MissionTraceDashboard: FC<Props> = ({
             }} disabled={effectiveStepPage === maxStepPage}>Newer <ChevronRight size={14} /></button>
           </div>}
           <div className="sp-history-bottom">
-            <span>{historyItems.length ? `Step ${activeIndex + 1} / ${historyItems.length}` : "No steps"}</span>
+            <span>{isChatSelected ? "Chat" : historyItems.length ? `Step ${activeIndex + 1} / ${historyItems.length}` : "No steps"}</span>
             <span>{historyItems[activeIndex] ? clock(historyItems[activeIndex]!.at) : "—"}</span>
           </div>
         </aside>
 
-        {isResultSelected ? (
-          <section className="sp-result-pane" aria-label="Mission result">
-            <div className="sp-result-heading">
-              <span className="sp-result-heading-icon" aria-hidden="true"><FileText size={19} /></span>
-              <div>
-                <strong>Mission result</strong>
-                <p>Conversation history · Original chat messages and actions</p>
-              </div>
-              <StatusChip status={missionStatus} />
-            </div>
-            <div className={`sp-result-document ${conversation ? "sp-result-chat-document" : ""}`}>
+        <div className="sp-main-stage">
+          <section className={`sp-chat-pane ${!isChatSelected ? "sp-pane-hidden" : ""} ${!hasConversation ? "sp-chat-empty" : ""}`}
+            aria-label="Chat" aria-hidden={!isChatSelected}>
+            {!hasConversation && <div className="sp-chat-welcome">
+              <MessageSquare size={24} strokeWidth={1.8} aria-hidden="true" />
+              <h2>What can Arrow help you with?</h2>
+            </div>}
+            <div className="sp-chat-thread">
               {conversation || (result.trim() ? <div className="sp-result-markdown" role="document">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
-              </div> : <div className="sp-result-pending">
-                <Info size={19} aria-hidden="true" />
-                <span>No conversation messages are available yet.</span>
-              </div>)}
+              </div> : null)}
             </div>
+            {composer && <div className="sp-chat-composer-dock">{composer}</div>}
+            {chatLoading && <div className="sp-chat-awaiting" role="status" aria-live="polite">
+              <span className="sp-chat-loading-dots" aria-hidden="true">
+                <span /><span /><span />
+              </span>
+              <span>{awaitingStream ? "Connecting to mission stream…" : "Arrow is working…"}</span>
+            </div>}
           </section>
-        ) : (
-        <div className="sp-content">
-          <div className="sp-card-grid">
+          <div className={`sp-content ${isChatSelected ? "sp-pane-hidden" : ""}`} aria-hidden={isChatSelected}>
+          <div className="sp-card-grid sp-timeline-card-grid">
             <section className="sp-box sp-tone-violet" aria-label="Embabel plan">
               <PanelHeading icon={Target} title="Embabel plan"
-                meta={attrs(displayedPlan).planIteration ? `#${attrs(displayedPlan).planIteration}` : "—"} />
+                meta={attrs(displayedPlan).planIteration ? `Iteration ${attrs(displayedPlan).planIteration}` : "No plan"} />
               <div className="sp-box-content">
                 <div className="sp-primary" title={planView.rawPlan || planView.actions.map(a => a.id).join(" → ")}>
                   {planView.preview}
                 </div>
-                <div className="sp-sub">Goal: {attrs(displayedPlan).goal || "Not emitted"}
+                <div className="sp-sub">{!displayedPlan ? "No Embabel plan emitted" : planIsPrevious ? "Most recent prior plan" : "Plan associated with this step"}
                   {attrs(displayedPlan).replanning === "true" ? " · Replanned" : ""}
                 </div>
-                {planView.actions.length > 0 && (
-                  <details className="sp-plan-details">
-                    <summary>Action sequence · {planView.actions.length}{planView.total > planView.actions.length ? ` of ${planView.total}` : ""}</summary>
-                    <ol className="sp-plan-sequence">
-                      {planView.actions.map((action, index) => (
-                        <li key={`${index}-${action.id}`}>
-                          <span>{action.label}</span><code title={action.id}>{action.id}</code>
-                        </li>
-                      ))}
-                    </ol>
-                    {planView.truncated && <div className="sp-plan-warning">Only the emitted part of this plan is available.</div>}
-                    {planView.rawPlan && <div className="sp-plan-original" title="Qualified action names from Embabel">
-                      <strong>Original action identifiers</strong><code>{planView.rawPlan}</code>
-                      {attrs(displayedPlan).planRawTruncated === "true" && <em>Raw identifier field truncated; use the compact sequence above.</em>}
-                    </div>}
-                  </details>
-                )}
+                <div className="sp-footnote">Embabel planner target: {attrs(displayedPlan).goal || "Not emitted"}; this is not user-answer certification.</div>
+                {planView.actions.length > 0 && <details className="sp-plan-details">
+                  <summary>Action sequence · {planView.actions.length}{planView.total > planView.actions.length ? ` of ${planView.total}` : ""}</summary>
+                  <ol className="sp-plan-sequence">{planView.actions.map((item, index) =>
+                    <li key={`${index}-${item.id}`}><span>{item.label}</span><code title={item.id}>{item.id}</code></li>)}</ol>
+                  {planView.truncated && <div className="sp-plan-warning">The emitted plan is truncated.</div>}
+                  {planView.rawPlan && <div className="sp-plan-original"><strong>Original Embabel action identifiers</strong><code>{planView.rawPlan}</code></div>}
+                </details>}
               </div>
             </section>
 
-            <section className="sp-box sp-tone-mint" aria-label="Decision and result">
-              <PanelHeading icon={GitBranch} title="Decision" meta={step?.label || "—"} />
+            <section className="sp-box sp-tone-mint" aria-label="Goal review and selected action">
+              <PanelHeading icon={GitBranch} title={isReview ? "Goal review" : "Selected action"} meta={step?.label || "—"} />
               <div className="sp-box-content">
-                <div className="sp-primary">
-                  {aReview.goalStatus ? `${aReview.goalStatus} · ${shortAction(aReview.nextAction || "NONE")}` :
-                    aAction.capability ? `${aAction.capability} · ${humanStatus(action?.status)}` :
-                      aGraph.resultCount != null ? `${aGraph.resultCount} graph result(s)` :
-                        step?.label === "Complete" ? "Mission finalized" : "No decision emitted"}
-                </div>
-                <div className="sp-sub">{aReview.validation ? `Java: ${aReview.validation}` :
-                  aAction.capability ? `Capability attempt ${aAction.attempt || "1"}` : "From emitted mission events"}</div>
-              </div>
-            </section>
-
-            <section className="sp-box sp-tone-blue" aria-label="Resolved entities and evidence">
-              <PanelHeading icon={FileSearch} title="Entities / evidence"
-                meta={entities.evidence == null ? "No count" : `${entities.evidence} refs`} />
-              <div className="sp-box-content">
-                {entities.state === "not-started" ? <>
-                  <div className="sp-primary sp-muted-primary">Not searched</div>
-                  <div className="sp-sub">No entity retrieval attempt recorded</div>
-                </> : entities.state === "failed" ? <>
-                  <div className="sp-primary sp-text-danger"><AlertCircle size={15} aria-hidden="true" /> Search failed</div>
-                  <div className="sp-sub" title={entities.failureDetail}>
-                    {entities.failedAttempts} failed {entities.failedAttempts === 1 ? "attempt" : "attempts"}
-                    {entities.failureDetail ? ` · ${entities.failureDetail}` : " · No result emitted"}
+                {isReview ? <>
+                  <div className={`sp-primary ${aReview.goalStatus === "BLOCKED" ? "sp-text-danger" : ""}`}>
+                    Goal: {aReview.goalStatus || "Not yet evaluated"}
                   </div>
-                </> : <>
-                  <div className="sp-primary">{entities.state === "found" ?
-                    entities.results != null ? `${entities.results} graph results` :
-                      entities.roots != null ? `${entities.roots} graph roots` :
-                        `${entities.names.length} named entities` :
-                    entities.state === "empty" ? "0 graph results" : "Search attempted"}</div>
-                  <div className="sp-sub">{entities.names.length ? entities.names.join(" · ") :
-                    entities.state === "attempted" ? "No verified result count in trace" :
-                      entities.type ? `${entities.type} · names not in trace` : "Entity names not emitted"}</div>
-                </>}
-                {(entities.evidence != null || stepEvidenceAdded > 0) && <div className="sp-footnote">
-                  {entities.evidence != null ? `${entities.evidence} cumulative evidence refs` : "Evidence count unavailable"}
-                  {stepEvidenceAdded > 0 ? ` · +${stepEvidenceAdded} this step` : ""}
-                </div>}
-              </div>
-            </section>
-
-            <section className="sp-box sp-tone-amber" aria-label="JEV decision">
-              <PanelHeading icon={Scale} title="JEV"
-                meta={vote ? (aVote.decision || "Recorded") : "No vote"} />
-              <div className="sp-box-content">
-                {vote ? <>
-                  <div className="sp-primary">{aVote.field || "vote"}: {aVote.choice || aVote.vote || "—"}</div>
-                  <div className="sp-sub">Confidence {aVote.confidence || "?"} · threshold {aVote.threshold || "?"}</div>
-                </> : <>
-                  <div className="sp-primary sp-muted-primary">No vote recorded</div>
-                  <div className="sp-sub">No JEV vote emitted for this step</div>
-                </>}
-              </div>
-            </section>
-
-            <section className="sp-box sp-tone-rose" aria-label="LLM invocation and output">
-              <PanelHeading icon={BrainCircuit} title="LLM"
-                meta={llmEnd ? aLlmEnd.outcome || "Received" : llmStart ? "Running" : "No call"} />
-              <div className="sp-box-content">
-                {llmStart || llmEnd ? <>
-                  <div className="sp-primary" title={aLlmEnd.model}>
-                    {aLlmEnd.model || aLlmEnd.provider || "Structured decision"} · {aLlm.fieldCount || aLlmEnd.fieldCount || "?"} fields
+                  <div className="sp-timeline-fact"><strong>Next action</strong><span>{capabilityLabel(aReview.nextAction)}</span></div>
+                  <div className="sp-sub">{aValidation.validation === "FAST_PATH_OR_NO_LLM"
+                    ? "Validated by Java fast path; no goal-review LLM was required"
+                    : aValidation.validation ? `Validation: ${aValidation.validation}` : "Derived from emitted goal-review events"}</div>
+                  {aReview.goalStatus === "BLOCKED" && <div className="sp-timeline-warning">Goal was not certified. This does not negate any verified graph rows.</div>}
+                </> : isAction ? <>
+                  <div className="sp-primary">{capabilityLabel(aAction.capability)}</div>
+                  <div className="sp-timeline-fact"><strong>Capability</strong><span>{aAction.capability || "Not emitted"}</span></div>
+                  <div className="sp-sub">Attempt {aAction.attempt || "?"} · Execution {humanStatus(action?.status)}</div>
+                  <div className="sp-footnote">JEV and LLM decisions made inside this action are shown in Model decisions.</div>
+                </> : step?.anchor.kind === "MISSION_FINISH" ? <>
+                  <div className="sp-primary">Execution {humanStatus(missionStatus)}</div>
+                  <div className={`sp-timeline-fact ${finalGoalStatus === "BLOCKED" ? "sp-text-danger" : ""}`}>
+                    <strong>Answer certification</strong><span>{finalGoalStatus || "Not emitted"}</span>
                   </div>
-                  <div className="sp-sub">{aProposal.goalStatus ?
-                    `Proposal: ${aProposal.goalStatus}${aProposal.nextAction ? ` / ${shortAction(aProposal.nextAction)}` : ""}` :
-                    aLlm.stage || "Structured generation"}</div>
-                  <div className="sp-footnote">Prompt and full response not in SSE</div>
+                  {finalGoalStatus === "BLOCKED" && <div className="sp-timeline-warning">An answer was produced, but AGSVC did not certify the goal.</div>}
+                </> : step?.anchor.kind === "RESPONSE_SYNTHESIS" ? <>
+                  <div className="sp-primary">Answer synthesis</div>
+                  <div className="sp-sub">Goal status at synthesis: {attrs(step.anchor).goalStatus || "Not emitted"}</div>
                 </> : <>
-                  <div className="sp-primary sp-muted-primary">No LLM call recorded</div>
-                  <div className="sp-sub">No model event emitted for this step</div>
+                  <div className="sp-primary">{step?.label || "Waiting for the mission"}</div>
+                  <div className="sp-sub">The selected phase has no goal decision or capability selection.</div>
                 </>}
               </div>
             </section>
 
-            <section className="sp-box sp-tone-teal" aria-label="Sources and tools">
-              <PanelHeading icon={Database} title="Sources & tools"
-                meta={sources.tools.length ? `${sources.tools.length} tools` : "No tools"} />
+            <section className="sp-box sp-tone-amber" aria-label="JEV and LLM model decisions">
+              <PanelHeading icon={Scale} title="Model decisions" meta={`${votes.length} JEV · ${llmCalls.length} LLM`} />
               <div className="sp-box-content">
-                {sources.attempts ? <>
-                  <div className="sp-primary">{sources.attempts} capability {sources.attempts === 1 ? "attempt" : "attempts"}
-                    {sources.failures > 0 ? <span className="sp-small-error"> · {sources.failures} failed</span> : ""}
-                  </div>
-                  <div className="sp-sub" title={sources.tools.join(" · ")}>{sources.tools.join(" · ") || "Tool names not emitted"}</div>
-                  <div className="sp-footnote">{sources.observedResults} service/result events emitted</div>
+                {!votes.length && !llmCalls.length ? <>
+                  <div className="sp-primary sp-muted-primary">No model decision in this step</div>
+                  <div className="sp-sub">{isReview && aValidation.validation === "FAST_PATH_OR_NO_LLM"
+                    ? "Goal review used Java fast-path validation"
+                    : "No JEV votes or LLM invocations emitted"}</div>
                 </> : <>
-                  <div className="sp-primary sp-muted-primary">No tool calls recorded</div>
-                  <div className="sp-sub">As of the selected step</div>
+                  {!!votes.length && <div className="sp-timeline-group-heading">JEV · {votes.length} vote(s){rejectedVotes ? ` · ${rejectedVotes} below threshold` : ""}</div>}
+                  {votes.map(t => {
+                    const a = attrs(t);
+                    const below = a.decision === "BELOW_THRESHOLD";
+                    return <div className="sp-timeline-vote" key={t.id}>
+                      <div><strong>{a.field || "Decision"}</strong><span>{a.choice || "—"}</span></div>
+                      <div className={below ? "sp-timeline-vote-rejected" : "sp-sub"}>
+                        Confidence {a.confidence || "?"} / required {a.threshold || "?"} · {below ? "Not accepted" : a.decision || "Recorded"}
+                      </div>
+                    </div>;
+                  })}
+                  {!!unresolved.length && <div className="sp-footnote">{unresolved.length} unresolved bounded check(s) recorded</div>}
+                  {!!llmCalls.length && <div className="sp-timeline-group-heading">LLM · {llmCalls.length} invocation(s)</div>}
+                  {llmCalls.map(call => <div className="sp-timeline-vote" key={call.id}>
+                    <div><strong>{attrs(call).stage || "Structured generation"}</strong>
+                      <span>{attrs(call).fieldCount || "?"} fields</span></div>
+                    <div className="sp-sub">{attrs(llmResults.find(response => response.parentId === call.id)).model || "Model response pending"}
+                      {llmResults.some(response => response.parentId === call.id) ? " · Response received" : ""}</div>
+                  </div>)}
+                  {!!llmCalls.length && <div className="sp-footnote">The stream records LLM invocation and receipt, not the full structured output or accepted field values.</div>}
                 </>}
+              </div>
+            </section>
+
+            <section className="sp-box sp-tone-teal" aria-label="Tool execution and verified evidence">
+              <PanelHeading icon={Database} title="Tool & evidence"
+                meta={stepEvidenceAdded ? `+${stepEvidenceAdded} evidence` : "This step"} />
+              <div className="sp-box-content">
+                {graphResult ? <>
+                  <div className="sp-primary">{aGraph.resultCount || "?"} matching graph rows</div>
+                  <div className="sp-sub">Evaluated {aGraph.rootCount || "?"} {aGraph.rootType || ""} roots · {aGraph.complete === "true" && aGraph.truncated === "false" ? "Complete result" : "Completeness unverified"}</div>
+                  <div className="sp-timeline-fact"><strong>Query</strong><span>{aBound.traversalCount || "?"} traversals · {aBound.predicateCount || "?"} predicates · {aBound.projectionCount || "?"} projections</span></div>
+                  <div className="sp-footnote">Query completeness confirms the executed scope, not mission-goal certification.</div>
+                </> : entitySearch ? <>
+                  <div className="sp-primary">Internal entity search completed</div>
+                  <div className="sp-sub">Source: {aSearch.service || "INTSVC"} · Root type: {aSearch.rootType || "Not emitted"}</div>
+                  <div className="sp-footnote">This search event does not emit candidate labels or counts; they are not inferred.</div>
+                </> : isReview ? <>
+                  <div className="sp-primary">{beforeEvidence === undefined ? "Evidence count not emitted" : `${beforeEvidence} evidence ref(s) before review`}</div>
+                  <div className="sp-sub">No tool executed during this review step</div>
+                </> : isAction ? <>
+                  <div className="sp-primary">{aAction.capability ? "Capability execution recorded" : "No capability recorded"}</div>
+                  <div className="sp-sub">A verified service-result event has not been emitted in this step yet.</div>
+                </> : <>
+                  <div className="sp-primary sp-muted-primary">No tool result for this step</div>
+                  <div className="sp-sub">Open an action step for retrieval or graph-result details</div>
+                </>}
+                {stepEvidenceAdded > 0 && <div className="sp-timeline-fact"><strong>Stored evidence</strong><span>+{stepEvidenceAdded} reference(s) in this step</span></div>}
               </div>
             </section>
           </div>
@@ -440,7 +473,11 @@ export const MissionTraceDashboard: FC<Props> = ({
                   <span className="sp-event-time">{clock(eventTime(t))}</span>
                   <span className="sp-event-title"><span className={`sp-event-dot sp-dot-${statusKind(t.status)}`} aria-hidden="true" />
                     <strong>{t.title || t.kind}</strong></span>
-                  <span className="sp-event-status">{t.status ? <StatusChip status={t.status} /> : <span className="sp-event-no-status">—</span>}</span>
+                  <span className="sp-event-status">{t.kind === "JEV_VOTE" && attrs(t).decision === "BELOW_THRESHOLD"
+                    ? <span className="sp-chip sp-chip-neutral">Not accepted</span>
+                    : t.kind === "JEV_UNRESOLVED" ? <span className="sp-chip sp-chip-neutral">Unresolved</span>
+                    : t.kind === "GOAL_BLOCKED" ? <span className="sp-chip sp-chip-error">Blocked goal</span>
+                    : t.status ? <StatusChip status={t.status} /> : <span className="sp-event-no-status">—</span>}</span>
                   <span className="sp-event-description">{eventDetails(t) || "—"}</span>
                   <span className="sp-event-duration">{duration(t.durationMs)}</span>
                 </div>
@@ -451,8 +488,8 @@ export const MissionTraceDashboard: FC<Props> = ({
               <span>{rows.length} events · scroll to explore</span>
             </div>
           </section>
+          </div>
         </div>
-        )}
       </div>
     </section>
   );

@@ -82,7 +82,7 @@ function metricSeconds(ms?: number): string {
 }
 function count(n?: number): string { return n === undefined ? "—" : n.toLocaleString(); }
 
-export const MissionWorkspaceHeader: FC<{ composer: ReactNode }> = ({ composer }) => {
+export const MissionWorkspaceHeader: FC = () => {
   const context = useContext(MissionWorkspaceContext);
   const mission = context?.mission;
   const [metricsOpen, setMetricsOpen] = useState(false);
@@ -108,22 +108,23 @@ export const MissionWorkspaceHeader: FC<{ composer: ReactNode }> = ({ composer }
     ] as const;
   }, [mission]);
   const displayStatus = mission?.status || "Ready";
+  // Transport completion and mission-goal certification are separate facts.
+  const latestFinish = mission?.traces.findLast(trace => trace.kind === "MISSION_FINISH");
+  const goalStatus = latestFinish?.attributes?.goalStatus;
+  const uncertified = Boolean(goalStatus && goalStatus !== "SATISFIED");
   return (
     <header className="sp-workspace-toolbar" aria-label="Mission workspace toolbar">
       <div className="sp-workspace-identity">
         <span className="sp-workspace-logo" aria-hidden="true"><Route size={19} /></span>
         <div className="sp-workspace-identity-text">
           <div className="sp-workspace-title-line">
-            <strong>Mission walkthrough</strong>
+            <strong>Query Studio</strong>
             {mission?.planner && mission.planner !== "—" && <span className="sp-workspace-planner">{mission.planner}</span>}
           </div>
           <span className="sp-workspace-mission-id" title={mission?.missionId || ""}>
             {mission?.missionId || "No mission started"}
           </span>
         </div>
-      </div>
-      <div className="sp-workspace-composer" aria-label="Ask a question or start another mission">
-        {composer}
       </div>
       <div className="sp-workspace-right">
         <div className="sp-metrics-wrap" onMouseLeave={() => setMetricsOpen(false)}>
@@ -139,8 +140,10 @@ export const MissionWorkspaceHeader: FC<{ composer: ReactNode }> = ({ composer }
             </div>)}
           </div>
         </div>
-        <span className={`sp-workspace-state ${/FAIL|BLOCK/i.test(displayStatus) ? "sp-workspace-state-fail" : ""}`}>
+        <span className={`sp-workspace-state ${/FAIL|BLOCK/i.test(displayStatus) ? "sp-workspace-state-fail" : uncertified ? "sp-workspace-state-uncertified" : ""}`}
+          title={goalStatus ? `User goal certification: ${goalStatus}` : "Mission lifecycle status"}>
           {displayStatus.toLowerCase() === "completed" ? "Done" : displayStatus}
+          {uncertified ? ` · Goal ${goalStatus}` : ""}
         </span>
       </div>
     </header>
