@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -23,9 +24,12 @@ import java.util.Set;
 /**
  * Resolves the frozen semantic interpretation of a mission before execution.
  *
- * Bounded source decisions are evaluated by JEV. Planner decisions are also
- * JEV-first, with an explicitly marked HYBRID execution-policy fallback on
- * abstention. An LLM never selects either source policy or planner mode.
+ * Bounded source decisions are evaluated by JEV. On abstention, a declared
+ * conservative policy includes uncertain source requirements rather than
+ * misrepresenting them as accepted JEV votes or failing mission submission.
+ * Company-graph requirements imply internal context. Planner decisions are
+ * JEV-first, with an explicitly marked HYBRID policy fallback on abstention.
+ * An LLM never selects either source policy or planner mode.
  * Open-ended tool argument generation remains in dedicated resolvers.
  */
 @Component
@@ -86,13 +90,13 @@ public final class IntentComponent {
         Map<String, DecisionQuestion> definitions = questions();
         Map<String, DecisionQuestion> sourceQuestions = new LinkedHashMap<>(definitions);
         sourceQuestions.remove(HYBRID);
-        Map<String, Double> source = sourceProbabilities(context, sourceQuestions, request.missionId());
+        SourceResolution source = sourceProbabilities(context, sourceQuestions, request.missionId());
 
-        double documentUtility = source.get(DOCUMENT);
-        double internalUtility = source.get(INTERNAL);
-        double companyGraphUtility = source.get(COMPANY_GRAPH);
-        double verificationUtility = source.get(VERIFICATION);
-        double researchUtility = source.get(RESEARCH);
+        double documentUtility = source.observedUtility(DOCUMENT);
+        double internalUtility = source.observedUtility(INTERNAL);
+        double companyGraphUtility = source.observedUtility(COMPANY_GRAPH);
+        double verificationUtility = source.observedUtility(VERIFICATION);
+        double researchUtility = source.observedUtility(RESEARCH);
 
         Optional<DecisionResponse> plannerVote = decisions.tryBounded(
                 context, Map.of(HYBRID, definitions.get(HYBRID)),
@@ -104,16 +108,21 @@ public final class IntentComponent {
         boolean plannerPolicyFallback = plannerVote.isEmpty();
         double hybridUtility = plannerVote.map(v -> boundedProbability(v, HYBRID))
                 .orElse(Double.NaN);
-        boolean requiresDocumentEvidence = documentUtility >= sourceThreshold;
-        boolean requiresCompanyGraph = companyGraphUtility >= sourceThreshold;
+        boolean requiresDocumentEvidence = source.required(DOCUMENT, sourceThreshold);
+        boolean requiresCompanyGraph = source.required(COMPANY_GRAPH, sourceThreshold);
 
         // A graph traversal cannot occur without first resolving internal context.
         boolean requiresInternalContext =
-                internalUtility >= sourceThreshold || requiresCompanyGraph;
+                requiresCompanyGraph || source.required(INTERNAL, sourceThreshold);
 
-        boolean requiresVerification = verificationUtility >= sourceThreshold;
+        boolean requiresVerification = source.required(VERIFICATION, sourceThreshold);
 
-        MissionPath selectedPath = selectPath(request, researchUtility, researchThreshold);
+        // On uncertainty prefer durable execution, unless the caller explicitly
+        // selected a path. No fabricated research probability is recorded.
+        MissionPath selectedPath = source.abstainedFields().contains(RESEARCH)
+                ? (request.preferredPath() == MissionPath.UNSPECIFIED
+                    ? MissionPath.RESEARCH : request.preferredPath())
+                : selectPath(request, researchUtility, researchThreshold);
         // Source selection and planning strategy are independent decisions.
         // Typed multi-hop graph queries remain GOAP-eligible.
         PlannerMode plannerMode = plannerPolicyFallback
@@ -121,7 +130,10 @@ public final class IntentComponent {
 
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("intentEngine", "jev-first");
-        attributes.put("sourceDecisionProvider", "jev");
+        attributes.put("sourceDecisionProvider", source.abstainedFields().isEmpty() ? "jev" : "jev-with-policy");
+        attributes.put("sourceAbstainedFields", String.join(",", source.abstainedFields().stream().sorted().toList()));
+        attributes.put("sourceDerivedFields", String.join(",", source.derivedFields().stream().sorted().toList()));
+        attributes.put("sourceAbstentionPolicy", "REQUIRE_UNKNOWN_SOURCES");
         attributes.put("plannerDecisionSource", plannerPolicyFallback
                 ? "POLICY_ON_JEV_ABSTENTION" : "JEV");
         attributes.put("documentUtility", documentUtility);
@@ -157,7 +169,27 @@ public final class IntentComponent {
         );
     }
 
-    private Map<String, Double> sourceProbabilities(
+    /**
+     * Accepted probabilities and policy decisions are kept separate. A -1
+     * utility means JEV did not certify that field, never "JEV voted true".
+     * This is deliberately not an LLM fallback or a lower JEV threshold.
+     */
+    private record SourceResolution(
+            Map<String, Double> utilities,
+            Set<String> abstainedFields,
+            Set<String> derivedFields) {
+
+        double observedUtility(String field) {
+            return utilities.getOrDefault(field, -1.0d);
+        }
+
+        boolean required(String field, double threshold) {
+            return derivedFields.contains(field) || abstainedFields.contains(field)
+                    || observedUtility(field) >= threshold;
+        }
+    }
+
+    private SourceResolution sourceProbabilities(
             Map<String, Object> context,
             Map<String, DecisionQuestion> questions,
             String missionId) {
@@ -167,21 +199,54 @@ public final class IntentComponent {
         if (group.isPresent()) {
             for (String field : questions.keySet())
                 values.put(field, boundedProbability(group.get(), field));
-            return values;
+            return new SourceResolution(Map.copyOf(values), Set.of(), Set.of());
         }
-        // Recover each source vote independently so one abstention does not
-        // discard unrelated evidence requirements. Unresolved SOURCE votes
-        // remain fail-closed: we do not silently omit requested evidence.
+
+        // Resolve other source votes independently. Handle COMPANY_GRAPH before
+        // INTERNAL because requiring the graph logically requires internal context.
+        // A confidently required graph makes a separate INTERNAL JEV vote redundant.
+        Set<String> abstained = new LinkedHashSet<>();
+        Set<String> derived = new LinkedHashSet<>();
         for (var entry : questions.entrySet()) {
             String field = entry.getKey();
-            DecisionResponse vote = decisions.tryBounded(context,
-                    Map.of(field, entry.getValue()), minDecisionConfidence,
-                    missionId + ":source:" + field).orElseThrow(() ->
-                    new IllegalStateException(
-                            "JEV could not certify source requirement: " + field));
-            values.put(field, boundedProbability(vote, field));
+            if (INTERNAL.equals(field)) continue;
+            resolveSourceVote(context, missionId, entry.getKey(), entry.getValue(), values, abstained);
         }
-        return values;
+        if (questions.containsKey(INTERNAL)) {
+            boolean needsGraph = abstained.contains(COMPANY_GRAPH)
+                    || values.getOrDefault(COMPANY_GRAPH, -1.0d) >= sourceThreshold;
+            if (needsGraph) {
+                derived.add(INTERNAL);
+                values.put(INTERNAL, -1.0d);
+            } else {
+                resolveSourceVote(context, missionId, INTERNAL, questions.get(INTERNAL), values, abstained);
+            }
+        }
+        if (!abstained.isEmpty()) {
+            LOG.warn("mission.intent.source.jev-abstained missionId={} fields={} policy=REQUIRE_UNKNOWN_SOURCES",
+                    missionId, abstained);
+        }
+        return new SourceResolution(Map.copyOf(values), Set.copyOf(abstained), Set.copyOf(derived));
+    }
+
+    private void resolveSourceVote(
+            Map<String, Object> context,
+            String missionId,
+            String field,
+            DecisionQuestion question,
+            Map<String, Double> values,
+            Set<String> abstained) {
+        Optional<DecisionResponse> vote = decisions.tryBounded(context,
+                Map.of(field, question), minDecisionConfidence, missionId + ":source:" + field);
+        if (vote.isPresent()) {
+            values.put(field, boundedProbability(vote.get(), field));
+        } else {
+            // Fail closed on evidence completeness, NOT by throwing HTTP 500.
+            // The policy may retrieve more than required; it never removes an
+            // uncertain source, verification step, or durable research need.
+            abstained.add(field);
+            values.put(field, -1.0d);
+        }
     }
 
     private static Map<String, Object> state(IntentRequest request) {
