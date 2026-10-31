@@ -58,6 +58,12 @@ public final class GraphEvidenceGoalResolver {
             constraint, negated relationship or requested graph output.
             The root nodes have already been resolved; they are anchored by ID
             outside your output. Do not repeat those identity constraints.
+            A named qualifier can be the ROOT even if the requested output is a
+            different type (e.g. members reached from their owning entity).
+            If the verified root identity is the named qualifier in the user
+            question, do not ask the model to invent a second label/slug filter
+            for that same root. Build joins in the ontology's permitted direction
+            and preserve all other user constraints.
 
             Select joins using edgeId values from schemaEdges ONLY. Each join
             gives a source node variable, a target node variable, an edgeId,
@@ -93,6 +99,11 @@ public final class GraphEvidenceGoalResolver {
             onePerGroupBy and orderBy MUST reference aliases in outputs, not
             graph variable names or raw properties. A group is a distinct
             tuple of projected aliases; this is NOT COUNT, SUM, or aggregation.
+            For alphabetic/lexicographic first-N requests, sort ASC by the
+            PROJECTED name/label alias and limit to N, after all relationship
+            constraints have been enforced. For last-N use DESC. Do not sort
+            on an unprojected or unrelated root label when the requested output
+            is a related node reached by traversal.
             The optional selection.limit is the user-requested top-N count,
             not a request to enlarge the execution budget. Use limit=0 when
             no user-level limit is requested. Never silently drop sorting or grouping.
@@ -239,7 +250,11 @@ public final class GraphEvidenceGoalResolver {
                                 "predicateCount", Integer.toString(request.predicates().size()),
                                 "comparisonCount", Integer.toString(request.fieldComparisons().size()),
                                 "projectionCount", Integer.toString(request.projections().size()),
-                                "selectionLimit", request.selection() == null ? "none" : Integer.toString(request.selection().limit())));
+                                "selectionLimit", request.selection() == null ? "none" : Integer.toString(request.selection().limit()),
+                                "selectionOrder", request.selection() == null ? "none" :
+                                        request.selection().orderBy().stream()
+                                                .map(sort -> sort.alias() + (sort.descending() ? ":DESC" : ":ASC"))
+                                                .collect(java.util.stream.Collectors.joining(","))));
                 LOG.info("graph.goal.bound operation={} attempt={} roots={} traversals={} negatedTraversals={} predicates={} fieldComparisons={} projections={} elapsedMs={}",
                         operationId, attempt, request.rootIds().size(), request.traversals().size(),
                         request.negatedTraversals().size(), request.predicates().size(),

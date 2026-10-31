@@ -80,6 +80,11 @@ public final class MissionGoalReviewComponent {
         // evaluates verified evidence after the graph query completes.
         Decision mandatory = tryMandatoryEvidencePrerequisite(request, eligible);
         if (mandatory != null) return mandatory;
+        // If an exhaustive scan supplied roots but the graph compiler reports
+        // an ambiguity, another graph call with unchanged roots is not a repair.
+        // Allow a distinct corrective root-discovery query first.
+        Decision corrective = tryCorrectiveRootDiscovery(request, eligible);
+        if (corrective != null) return corrective;
 
         // JEV is authoritative for bounded status and capability decisions.
         // No structured LLM call is made merely to select a next action.
@@ -412,6 +417,45 @@ public final class MissionGoalReviewComponent {
         if (request.attempts().getOrDefault(action, 0) > 0) return null;
         return new Decision(Status.NEEDS_EVIDENCE, action, request.objective(),
                 "Execute the only remaining mandatory evidence prerequisite", List.of());
+    }
+
+    private Decision tryCorrectiveRootDiscovery(Request request, Set<String> eligible) {
+        if (!request.requiresCompanyGraph() || !eligible.contains(SEARCH)
+                || request.attempts().getOrDefault(GRAPH, 0) < 1
+                || request.attempts().getOrDefault(SEARCH, 0) != 1) return null;
+        Map<String, Object> latestSearch = null;
+        Map<String, Object> latestGraph = null;
+        for (Map<String, Object> observation : request.observations()) {
+            if (SEARCH.equals(observation.get("action"))) latestSearch = observation;
+            if (GRAPH.equals(observation.get("action"))) latestGraph = observation;
+        }
+        if (latestSearch == null || latestGraph == null) return null;
+        if (!(latestSearch.get("attributes") instanceof Map<?, ?> sa)
+                || !(latestGraph.get("attributes") instanceof Map<?, ?> ga)) return null;
+        String mode = Objects.toString(sa.get("rootSelectionMode"), "");
+        String status = Objects.toString(ga.get("graphResolutionStatus"), "");
+        if (!("TYPE_SCAN".equals(mode) || "MULTI_TYPE_SCAN".equals(mode))
+                || !"AMBIGUOUS".equals(status)) return null;
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("originalMission", request.objective());
+        context.put("observations", request.observations());
+        context.put("correctiveObjective", "Resolve literal named constraints before another graph query");
+        String generated = generateFollowUpQuery(request, context, SEARCH);
+        // Preserve the complete frozen objective verbatim in a corrective
+        // request: generated subquestions must not delete named constraints.
+        final String subquery = generated.isBlank() ? "" :
+                (generated.contains(request.objective()) ? generated
+                        : request.objective() + "\nCorrective evidence focus: " + generated);
+        if (subquery.isBlank() || request.observations().stream().anyMatch(o ->
+                SEARCH.equals(o.get("action"))
+                        && queryEquals(subquery, Objects.toString(o.get("query"), ""))))
+            return new Decision(Status.BLOCKED, NONE, "",
+                    "No distinct corrective root query was generated", List.of());
+        MissionDecisionTraceContext.event("ROOT_SCOPE_CORRECTION",
+                "Retry internal entity selection after ambiguous graph scope",
+                Map.of("priorRootMode", mode, "graphResolutionStatus", status));
+        return new Decision(Status.NEEDS_EVIDENCE, SEARCH, subquery,
+                "Re-resolve named graph constraints before repeating graph construction", List.of());
     }
 
     private static boolean hasCompleteGraphObservation(List<Map<String, Object>> observations) {

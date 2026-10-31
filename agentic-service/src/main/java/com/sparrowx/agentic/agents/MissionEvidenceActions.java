@@ -2,6 +2,7 @@ package com.sparrowx.agentic.agents;
 
 import com.embabel.agent.api.common.OperationContext;
 import com.sparrowx.agentic.actions.synthesis.BuildCitationsAction;
+import com.sparrowx.agentic.agents.MissionRunInput;
 import com.sparrowx.agentic.components.InternalSearchSpecResolver;
 import com.sparrowx.agentic.components.SystemOneUtilityComponent.UtilityAssessment;
 import com.sparrowx.agentic.components.SynthesisComponent;
@@ -17,8 +18,10 @@ import com.sparrowx.agentic.mission.model.MissionResult;
 import com.sparrowx.agentic.planning.MissionIntent;
 import com.sparrowx.agentic.planning.MissionCapabilities;
 import com.sparrowx.agentic.planning.InternalRootSelection;
+import com.sparrowx.agentic.planning.RootNameGrounding;
 import com.sparrowx.agentic.planning.InternalRootSelection.*;
 import com.sparrowx.agentic.planning.graph.GraphResolutionStatus;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import com.sparrowx.agentic.steps.BuildDocumentEvidenceStep;
 import com.sparrowx.agentic.steps.GoalDirectedCompanyGraphStep;
@@ -65,7 +68,7 @@ public final class MissionEvidenceActions {
     private MissionTracePublisher tracePublisher;
 
     // Optional method injection preserves the public constructor and tests.
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @Autowired(required = false)
     public void setTracePublisher(MissionTracePublisher tracePublisher) {
         this.tracePublisher = tracePublisher;
     }
@@ -340,6 +343,7 @@ public final class MissionEvidenceActions {
                         question, input.intent().requiresCompanyGraph())));
         Plan plan = extraction.plan();
         List<RootResult> rootResults = new ArrayList<>();
+        List<RootQuery> verifiedQueries = new ArrayList<>(plan.queries());
         boolean allRootQueriesExhaustive = true;
         List<EvidenceRef> refs = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
@@ -360,28 +364,73 @@ public final class MissionEvidenceActions {
 
             RootResult rootResult = InternalRootSelection.evaluate(
                     plan.mode(), rootQuery, result.candidates(),
-                    result.backendAmbiguous(), result.exhaustive(),
-                    question
-            );
-            rootResults.add(rootResult);
+                    result.backendAmbiguous(), result.exhaustive(), question);
             allRootQueriesExhaustive &= result.exhaustive();
             refs.addAll(result.evidenceRefs());
             warnings.addAll(result.warnings());
+
+            // A model can extract "Orion Gateway module" for an entity whose
+            // canonical label is "Orion Gateway". When its lexical search is
+            // exhaustively empty, discover candidates with IntSvc's authorized
+            // TYPE_SCAN, but admit ONLY a single verified label actually present
+            // in the ORIGINAL user request. Re-run EXACT search on that label.
+            // This discovery scan never becomes the answer's root scope.
+            if (rootResult.outcome() == Outcome.EMPTY && result.exhaustive()
+                    && (plan.mode() == Mode.UNIQUE || plan.mode() == Mode.EXPLICIT_SET)
+                    && (rootQuery.matchOperator() == MatchOperator.EXACT
+                    || rootQuery.matchOperator() == MatchOperator.RELEVANT)) {
+                rootResult = recoverNamedRoot(input, question, rootQuery, plan.mode(),
+                        effectId(input, "internal-search:" + queryFingerprint(question))
+                                + ":recover:" + i, refs, warnings);
+            }
+
+            // A lexical exact lookup may be empty because JEV picked the
+            // ANSWER type rather than the type of the explicitly named root.
+            // Recover across ontology types only through exhaustive IntSvc scans
+            // and a second exact lookup of a single original-query literal.
+            if (rootResult.outcome() == Outcome.EMPTY && result.exhaustive()
+                    && (plan.mode() == Mode.UNIQUE || plan.mode() == Mode.EXPLICIT_SET)
+                    && rootQuery.matchOperator() == MatchOperator.EXACT) {
+                rootResult = recoverNamedRootAcrossTypes(input, rootQuery,
+                        effectId(input, "internal-search:" + queryFingerprint(question))
+                                + ":type-recovery:" + i, refs, warnings);
+            }
+
+            // TYPE_SCAN is authorized to answer genuinely exhaustive questions,
+            // not to replace a failed lookup of an explicitly named entity.
+            // When labels in its candidate set are literally named by the user,
+            // fail closed instead of silently broadening to all graph nodes.
+            if ((plan.mode() == Mode.TYPE_SCAN || plan.mode() == Mode.MULTI_TYPE_SCAN)
+                    && rootResult.outcome() == Outcome.RESOLVED) {
+                List<String> named = RootNameGrounding.maximalMentions(
+                        input.request().query(), result.candidates().stream()
+                                .map(Candidate::label).toList());
+                if (!named.isEmpty()) {
+                    rootResult = new RootResult(rootQuery, List.of(), Outcome.INCOMPLETE,
+                            "TYPE_SCAN may broaden explicitly named roots " + named
+                                    + "; confirm starting scope before graph execution");
+                }
+            }
+            verifiedQueries.set(i, rootResult.query());
+            rootResults.add(rootResult);
             if (rootResult.outcome() != Outcome.RESOLVED
                     && rootResult.outcome() != Outcome.EMPTY) {
                 warnings.add(rootResult.detail());
             }
             LOGGER.info(
                     "Internal root mode={} query=[{}] type={} operator={} outcome={} matched={} exhaustive={} verification={}",
-                    plan.mode(), rootQuery.query(), rootQuery.type(), rootQuery.matchOperator(),
-                    rootResult.outcome(), rootResult.matched().size(), result.exhaustive(), rootResult.detail()
+                    plan.mode(), rootResult.query().query(), rootResult.query().type(),
+                    rootResult.query().matchOperator(), rootResult.outcome(), rootResult.matched().size(), result.exhaustive(), rootResult.detail()
             );
         }
 
-        Selection selection = new Selection(plan, rootResults);
+        // RootResult.query must exactly correspond to Plan.queries after
+        // canonical recovery; otherwise Selection rightly rejects the ledger.
+        Plan verifiedPlan = new Plan(plan.mode(), verifiedQueries, plan.perRootGraphQuestion());
+        Selection selection = new Selection(verifiedPlan, rootResults);
         Map<String, Object> attributes = new LinkedHashMap<>(extraction.debug());
-        attributes.put("rootSelectionMode", plan.mode().name());
-        attributes.put("rootQueryCount", plan.queries().size());
+        attributes.put("rootSelectionMode", verifiedPlan.mode().name());
+        attributes.put("rootQueryCount", verifiedPlan.queries().size());
         attributes.put("selectedRootCount", selection.selected().size());
         attributes.put("rootResolutionReady", selection.ready());
         // Expose backend-verified root completeness to the review layer.
@@ -408,6 +457,120 @@ public final class MissionEvidenceActions {
         );
     }
 
+    /**
+     * Recover a wrong surface literal using ONLY a complete, authorized scan of
+     * the previously selected ontology type. A recovery does not change type,
+     * add roots, invent an entity, or trust an unverified LLM-generated label.
+     */
+    private RootResult recoverNamedRoot(MissionRunInput input, String question,
+                                        RootQuery original, Mode mode, String requestId,
+                                        List<EvidenceRef> refs, List<String> warnings) {
+        var scanSpec = internalSearchSpecResolver.typeScanSpec(requestId + ":candidate-scan", original.type());
+        ResolveInternalEntitiesStep.Result scanned = traceCall(input, "internal", "Internal discovery",
+                "INTSVC_ROOT_RECOVERY_SCAN", "Inspect possible canonical root labels",
+                Map.of("service", "internal-service", "rootType", original.type()),
+                () -> internalStep.search(input.request().context(), scanSpec));
+        // A recovery scan is discovery, not answer evidence. Only the
+        // subsequent exact verification may contribute final evidence refs.
+        warnings.addAll(scanned.warnings());
+        if (!scanned.exhaustive()) return new RootResult(original, List.of(), Outcome.INCOMPLETE,
+                "Canonical root recovery scan was truncated; cannot certify root identity");
+
+        List<Candidate> candidates = scanned.candidates().stream()
+                .filter(c -> original.type().equals(c.nodeType())).toList();
+        List<String> names = candidates.stream().map(Candidate::label).toList();
+        List<String> anchored = RootNameGrounding.recoveryCandidates(
+                input.request().query(), original.query(), names, mode == Mode.UNIQUE);
+        if (anchored.size() > 1) return new RootResult(original, List.of(), Outcome.AMBIGUOUS,
+                "More than one canonical root name occurs in the user's question");
+        if (anchored.isEmpty()) return new RootResult(original, List.of(), Outcome.EMPTY,
+                "No uniquely grounded canonical label found for the selected root type");
+
+        String canonical = anchored.getFirst();
+        RootQuery corrected = new RootQuery(canonical, original.type(), MatchOperator.EXACT);
+        var exactSpec = internalSearchSpecResolver.searchSpec(requestId + ":verified-exact", corrected);
+        ResolveInternalEntitiesStep.Result matched = traceCall(input, "internal", "Internal discovery",
+                "INTSVC_ROOT_RECOVERY_VERIFY", "Verify canonical root identity",
+                Map.of("service", "internal-service", "rootType", original.type()),
+                () -> internalStep.search(input.request().context(), exactSpec));
+        refs.addAll(matched.evidenceRefs());
+        warnings.addAll(matched.warnings());
+        RootResult verified = InternalRootSelection.evaluate(mode, corrected, matched.candidates(),
+                matched.backendAmbiguous(), matched.exhaustive(), input.request().query());
+        if (verified.outcome() == Outcome.RESOLVED) {
+            // The candidate must be the one seen in the exhaustive scan; a
+            // changed projection cannot silently rebind the root by name.
+            Set<String> scannedIds = candidates.stream()
+                    .filter(c -> canonical.equalsIgnoreCase(c.label()))
+                    .map(Candidate::identity).collect(java.util.stream.Collectors.toSet());
+            if (!scannedIds.contains(verified.matched().getFirst().identity()))
+                return new RootResult(corrected, List.of(), Outcome.INCOMPLETE,
+                        "Canonical entity changed between discovery and verification");
+            LOGGER.info("internal.root-recovery.verified missionId={} original=[{}] canonical=[{}] type={}",
+                    input.missionId(), original.query(), canonical, original.type());
+        }
+        return verified;
+    }
+
+    /**
+     * Recover a misclassified named anchor type without trusting model-supplied
+     * node labels. Only ontology-declared, exhaustive backend scans can propose
+     * identities; original literal equality and a fresh exact search certify one.
+     * Ambiguity or truncation fails closed. No type is hardcoded.
+     */
+    private RootResult recoverNamedRootAcrossTypes(MissionRunInput input,
+                                                   RootQuery original, String requestId,
+                                                   List<EvidenceRef> refs, List<String> warnings) {
+        List<String> types = internalSearchSpecResolver.declaredTypes(input.request().context());
+        if (types.size() > 32) return new RootResult(original, List.of(), Outcome.INCOMPLETE,
+                "Ontology too large for bounded cross-type identity recovery");
+        List<Candidate> matches = new ArrayList<>();
+        for (String type : types) {
+            if (type.equals(original.type())) continue; // already exhaustively checked
+            var scan = internalSearchSpecResolver.typeScanSpec(requestId + ":scan:" + type, type);
+            ResolveInternalEntitiesStep.Result candidates = traceCall(input, "internal", "Internal discovery",
+                    "INTSVC_ROOT_TYPE_SCAN", "Verify named root against ontology types",
+                    Map.of("service", "internal-service", "rootType", type),
+                    () -> internalStep.search(input.request().context(), scan));
+            // Do not promote every scanned entity to answer evidence.
+            warnings.addAll(candidates.warnings());
+            if (!candidates.exhaustive()) return new RootResult(original, List.of(), Outcome.INCOMPLETE,
+                    "Cannot verify named root uniqueness: " + type + " scan was truncated");
+            candidates.candidates().stream()
+                    .filter(c -> type.equals(c.nodeType()))
+                    .filter(c -> original.query().equalsIgnoreCase(c.label())
+                            || original.query().equalsIgnoreCase(c.slug())
+                            || original.query().equalsIgnoreCase(c.entityId()))
+                    .forEach(matches::add);
+        }
+        List<Candidate> distinct = matches.stream()
+                .collect(java.util.stream.Collectors.toMap(Candidate::identity, c -> c, (a, b) -> a,
+                        java.util.LinkedHashMap::new)).values().stream().toList();
+        if (distinct.isEmpty()) return new RootResult(original, List.of(), Outcome.EMPTY,
+                "No verified ontology identity matched the named qualifier");
+        if (distinct.size() != 1) return new RootResult(original, List.of(), Outcome.AMBIGUOUS,
+                "Named qualifier matches multiple ontology entities/types");
+        Candidate canonical = distinct.getFirst();
+        RootQuery corrected = new RootQuery(original.query(), canonical.nodeType(), MatchOperator.EXACT);
+        var exactSpec = internalSearchSpecResolver.searchSpec(requestId + ":verify-exact", corrected);
+        ResolveInternalEntitiesStep.Result verified = traceCall(input, "internal", "Internal discovery",
+                "INTSVC_ROOT_TYPE_VERIFY", "Verify named root with exact type",
+                Map.of("service", "internal-service", "rootType", canonical.nodeType()),
+                () -> internalStep.search(input.request().context(), exactSpec));
+        refs.addAll(verified.evidenceRefs());
+        warnings.addAll(verified.warnings());
+        RootResult result = InternalRootSelection.evaluate(Mode.UNIQUE, corrected,
+                verified.candidates(), verified.backendAmbiguous(), verified.exhaustive(),
+                input.request().query());
+        if (result.outcome() != Outcome.RESOLVED) return result;
+        if (!canonical.identity().equals(result.matched().getFirst().identity()))
+            return new RootResult(corrected, List.of(), Outcome.INCOMPLETE,
+                    "Named qualifier identity changed between discovery and verification");
+        LOGGER.info("internal.root-type-recovery.verified missionId={} type={} literal=[{}]",
+                input.missionId(), corrected.type(), corrected.query());
+        return result;
+    }
+
     /*
      * ------------------------------------------------------------------
      * COMPANY GRAPH
@@ -415,7 +578,7 @@ public final class MissionEvidenceActions {
      */
 
     public CompanyGraphState readCompanyGraph(MissionRunInput input,
-            InternalSearchState searchState, OperationContext context) {
+                                              InternalSearchState searchState, OperationContext context) {
         return readCompanyGraph(input, searchState, context,
                 searchState.selection().plan().perRootGraphQuestion());
     }
@@ -460,10 +623,10 @@ public final class MissionEvidenceActions {
         GoalDirectedCompanyGraphStep.Prepared prepared = traceCall(input, "internal", "Company graph", "GRAPH_COMPILE", "Compile graph goal",
                 Map.of("rootCount", Integer.toString(candidates.size())),
                 () -> graphTraversalStep.prepare(input.request().context(),
-                    effectId(input, "company-graph:" + queryFingerprint(question + selection.selected().toString())) + ":batch",
-                    candidates.stream().map(candidate -> new GoalDirectedCompanyGraphStep.SelectedRoot(
-                            candidate.entityId(), candidate.nodeType())).toList(),
-                    input.intent(), question));
+                        effectId(input, "company-graph:" + queryFingerprint(question + selection.selected().toString())) + ":batch",
+                        candidates.stream().map(candidate -> new GoalDirectedCompanyGraphStep.SelectedRoot(
+                                candidate.entityId(), candidate.nodeType())).toList(),
+                        input.intent(), question));
 
         List<RootGraphOutcome> outcomes = new ArrayList<>();
         List<EvidenceRef> allRefs = new ArrayList<>();
@@ -912,8 +1075,8 @@ public final class MissionEvidenceActions {
      * This method performs no model invocation or heuristic action selection.
      */
     private static UtilityAssessment reassess(MissionRunInput input, OperationContext context,
-            String latestAction, String latestSummary, Map<String, Object> latestAttributes,
-            List<EvidenceRef> latestEvidenceRefs, String resolvedEntityId, String resolvedEntityType) {
+                                              String latestAction, String latestSummary, Map<String, Object> latestAttributes,
+                                              List<EvidenceRef> latestEvidenceRefs, String resolvedEntityId, String resolvedEntityType) {
         return new UtilityAssessment(0, 0, 0, 0, 0,
                 "not-ranked", "not-ranked", effectId(input, "observation:" + latestAction));
     }
