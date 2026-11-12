@@ -100,17 +100,35 @@ public final class GraphEvidenceProjector {
                     "random", selection.random(), "limit", selection.limit()));
         }
 
-        Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("rootEntityIds", requestedRoots.stream().sorted().toList());
-        attributes.put("validatedGraphAnswerRows", project(response));
-        attributes.put("validatedGraphQuery", Map.copyOf(queryProof));
-        attributes.put("readAtEpochSecond", response.getRetrievedAt().getSeconds());
-        attributes.put("readAtNano", response.getRetrievedAt().getNanos());
-        attributes.put("truncated", false);
-        return List.of(new EvidenceRef("internal-graph-query:" + requestId,
-                EvidenceSourceType.INTERNAL_GRAPH, "internal-service", requestId,
-                "", "", requestId, "", "COMPANY_GRAPH_QUERY", 0, 0, "", "", "",
-                Map.copyOf(attributes)));
+        // Each reference cites one root's slice of the final batch result. Keep
+        // the original batch scope: ORDER BY/limit/grouping may span roots.
+        List<Map<String, Object>> rows = project(response);
+        List<EvidenceRef> refs = new ArrayList<>();
+        for (String rootId : requestedRoots.stream().sorted().toList()) {
+            List<Map<String, Object>> rootRows = rows.stream()
+                    .filter(row -> rootId.equals(row.get("rootEntityId"))).toList();
+            Map<String, Object> attributes = new LinkedHashMap<>();
+            attributes.put("rootEntityIds", List.of(rootId));
+            attributes.put("queryRootEntityIds", requestedRoots.stream().sorted().toList());
+            attributes.put("rootNodeType", executedQuery.rootType());
+            attributes.put("resultScope", "ROOT_SLICE_OF_BATCH");
+            attributes.put("validatedGraphAnswerRows", rootRows);
+            attributes.put("validatedGraphQuery", Map.copyOf(queryProof));
+            attributes.put("readAtEpochSecond", response.getRetrievedAt().getSeconds());
+            attributes.put("readAtNano", response.getRetrievedAt().getNanos());
+            attributes.put("truncated", false);
+            // No rows means absence in this executed query's final result, not
+            // absence of every possible relationship for the root.
+            attributes.put("emptyQueryResult", rootRows.isEmpty());
+            String scopeId = requestId + ":root:" + UUID.nameUUIDFromBytes(
+                    (executedQuery.rootType() + "\u001f" + rootId)
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            refs.add(new EvidenceRef("internal-graph-query:" + scopeId,
+                    EvidenceSourceType.INTERNAL_GRAPH, "internal-service", scopeId,
+                    "", "", rootId, "", "COMPANY_GRAPH_QUERY", 0, 0, "", "", "",
+                    Map.copyOf(attributes)));
+        }
+        return List.copyOf(refs);
     }
 
     private static Object value(GraphQueryValue cell) {

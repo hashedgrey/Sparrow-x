@@ -11,10 +11,14 @@ import com.sparrowx.agentic.planning.graph.GraphRootScope;
 import com.sparrowx.agentic.tools.internal.GraphEvidenceProjector;
 import com.sparrowx.agentic.adapters.internal.InternalGrpcClient;
 import com.sparrowx.agentic.adapters.internal.GraphQueryRequestMapper;
+import com.sparrowx.agentic.adapters.internal.InternalClientResiliencePolicy.InternalClientException;
+import io.grpc.Deadline;
+import io.grpc.Status;
 import org.springframework.stereotype.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.*;
+import java.util.concurrent.CancellationException;
 
 /** Typed, batch-executed graph goals for arbitrary tenant ontology node types. */
 @Component
@@ -71,7 +75,13 @@ public final class GoalDirectedCompanyGraphStep {
         return new Prepared(grouped,compiled,query);
     }
     public Result executeBatch(MissionContext context,String requestId,Prepared prepared,String type) {
+        return executeBatch(context, requestId, prepared, type, null);
+    }
+    public Result executeBatch(MissionContext context,String requestId,Prepared prepared,String type,
+                               Deadline batchDeadline) {
         Objects.requireNonNull(prepared);
+        if (batchDeadline != null && batchDeadline.isExpired())
+            return failed(GraphResolutionStatus.INSUFFICIENT,"Graph batch time budget exhausted");
         var resolution=Objects.requireNonNull(prepared.compiledGoals().get(type),"Unknown root type");
         if (!resolution.ready()) return failed(resolution.status(),resolution.reason());
         GraphQueryRequest query=resolution.query();
@@ -94,11 +104,22 @@ public final class GoalDirectedCompanyGraphStep {
                     rows.isEmpty()?"Exhaustive query found no matching rows":"Resolved graph roots",
                     Map.of("graphResolutionStatus",GraphResolutionStatus.COMPLETE.name(),
                             "validatedGraphAnswerRows",rows,"evaluatedRoots",selected.size(),
+                            "evaluatedRootEntityIds",selected.stream().sorted().toList(),
+                            "rootNodeType",type,
                             "matchingRowCount",rows.size()));
-        } catch (SecurityException | IllegalArgumentException error) {
+        } catch (SecurityException | IllegalArgumentException | CancellationException error) {
             // Do not relabel authorization and programming defects as a
             // recoverable evidence shortage.
             throw error;
+        } catch (InternalClientException error) {
+            Status.Code code = error.failure().statusCode();
+            if (code == Status.Code.PERMISSION_DENIED || code == Status.Code.UNAUTHENTICATED)
+                throw new SecurityException("Internal graph authorization was denied", error);
+            if (code == Status.Code.CANCELLED) throw error;
+            LOG.warn("Graph transport failed requestId={} rootType={} status={}",requestId,type,code);
+            return failed(GraphResolutionStatus.INSUFFICIENT,
+                    code == Status.Code.DEADLINE_EXCEEDED ? "Graph query deadline exceeded"
+                            : "Graph query execution failed; inspect mission trace");
         } catch (RuntimeException error) {
             LOG.warn("Graph query execution failed requestId={} rootType={} exception={}",
                     requestId, type, error.getClass().getName(), error);

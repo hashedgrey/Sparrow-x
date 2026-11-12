@@ -338,6 +338,11 @@ public final class SynthesisComponent {
             - Keep executive_summary concise.
             Graph evidence formats:
             - graphQueryResults contains validated IntSvc query results, grouped by evidenceId.
+            - ROOT_SLICE_OF_BATCH evidence contains one root's rows from a query
+              executed across queryRootEntityIds. Sorting, grouping and limits
+              apply across that batch. An empty slice proves no rows for that
+              root in the FINAL selected result; it does not prove the absence
+              of a relationship excluded by the query's selection rules.
               Read answer values from validatedGraphAnswerRows using their projection aliases.
               validatedGraphQuery records the query IntSvc schema-validated and executed:
               traversals are relationship requirements; predicates are applied
@@ -437,6 +442,15 @@ public final class SynthesisComponent {
                 proof.put("evidenceId", ref.evidenceId());
                 proof.put("sourceService", ref.sourceService());
                 proof.put("rootEntityIds", List.copyOf(roots));
+                if ("ROOT_SLICE_OF_BATCH".equals(attributes.get("resultScope"))) {
+                    Object originalScope = attributes.get("queryRootEntityIds");
+                    if (!(originalScope instanceof Collection<?> queryRoots)
+                            || !queryRoots.containsAll(roots)
+                            || queryRoots.stream().anyMatch(root -> !(root instanceof String id) || id.isBlank()))
+                        throw new IllegalStateException("Graph slice is missing its original query scope");
+                    proof.put("queryRootEntityIds", List.copyOf(queryRoots));
+                    proof.put("resultScope", "ROOT_SLICE_OF_BATCH");
+                }
                 proof.put("validatedGraphAnswerRows", List.copyOf(rows));
                 Object executedQuery = attributes.get("validatedGraphQuery");
                 if (executedQuery != null) {
