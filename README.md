@@ -7,7 +7,8 @@
 
 **SparrowX** is an internal knowledge and agentic investigation platform for engineering organizations. It combines structured company context, document intelligence, bounded semantic decisions, goal-directed execution and verifiable evidence in a single assistant.
 
->Think of the intelligence behind enterprise AI platforms like Glean and Moveworks. This is the perspective as one of the Agentic Engineers building and maintaining it.
+>Think of the intelligence behind enterprise AI platforms like Glean and Moveworks. This is the perspective of one of the Agentic Engineers building and maintaining them.
+ 
 
 ![SparrowX runtime traffic flow](resources/sp-architecture-flow.gif)
 
