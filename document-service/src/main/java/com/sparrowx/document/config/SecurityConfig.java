@@ -29,6 +29,9 @@ public class SecurityConfig {
                         ).permitAll()
                         .anyRequest().authenticated()
                 )
+                // HTTP service account for the local Next.js server proxy.
+                // Replace with your JWT/session authentication before multi-tenant production use.
+                .httpBasic(Customizer.withDefaults())
                 .build();
     }
 }

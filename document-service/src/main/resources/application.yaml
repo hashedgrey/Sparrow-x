@@ -37,6 +37,8 @@ spring:
     server:
       port: ${DOCUMENT_GRPC_PORT:50054}
 
+server:
+  port: ${DOCUMENT_HTTP_PORT:8080}
 
 sparrowx:
   document:
@@ -79,11 +81,14 @@ sparrowx:
       embedding-batch-size: ${DOCUMENT_RAG_EMBEDDING_BATCH_SIZE:100}
 
     dice:
+      embedding-timing-enabled: true
       ingestion:
         extraction-batch-size: ${DOCUMENT_DICE_EXTRACTION_BATCH_SIZE:2}
         extraction-threads: ${DOCUMENT_DICE_EXTRACTION_THREADS:3}
         projection-parallelism: ${DOCUMENT_DICE_PROJECTION_PARALLELISM:2}
-        existing-propositions-to-show: ${DOCUMENT_DICE_EXISTING_PROPOSITIONS:25}
+        existing-propositions-to-show: ${DOCUMENT_DICE_EXISTING_PROPOSITIONS:5}
         schema-adherence: ${DOCUMENT_DICE_SCHEMA_ADHERENCE:RELAXED}
         entity-tenant-filter-enabled: true
         entity-vector-search-enabled: false
+        proposition-batch-embedding-enabled: ${DOCUMENT_DICE_PROPOSITION_BATCH_EMBEDDING_ENABLED:true}
+        proposition-embedding-batch-size: ${DOCUMENT_DICE_PROPOSITION_EMBEDDING_BATCH_SIZE:16}
