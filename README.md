@@ -89,7 +89,7 @@ flowchart TD
 
     G -->|Needs evidence| H[Score eligible capabilities]
     H --> I{New subquery needed?}
-    I -->|Yes| J[Escalate to generative LLM]
+    I -->|Yes| J[System 2: Escalate to generative LLM]
     I -->|No| K[Use original query]
 
     J --> L[Embabel: GOAP/HYBRID action selection]
