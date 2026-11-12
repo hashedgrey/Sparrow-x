@@ -24,6 +24,7 @@ public class HybridDocumentRetriever {
 
     private static final int DEFAULT_LIMIT = 10;
     private static final int MAX_LIMIT = 50;
+    private static final int HYBRID_OVERFETCH_FACTOR = 3;
 
     private final KeywordDocumentSearcher keywordDocumentSearcher;
     private final VectorDocumentSearcher vectorDocumentSearcher;
@@ -150,30 +151,35 @@ public class HybridDocumentRetriever {
             RetrieveDocumentsRequest request,
             int limit
     ) {
-        List<RetrievalEvidence> keywordEvidence = keywordOnly(request, limit);
-        List<RetrievalEvidence> vectorEvidence = vectorOnly(request, limit);
+        // Retrieve more candidates per engine so fusion has a useful candidate pool.
+        // Repository/searcher limits remain capped at 50.
+        int candidateLimit = Math.min(MAX_LIMIT, limit * HYBRID_OVERFETCH_FACTOR);
+        List<RetrievalEvidence> keywordEvidence = keywordOnly(request, candidateLimit);
+        List<RetrievalEvidence> vectorEvidence = vectorOnly(request, candidateLimit);
 
         Map<String, HybridCandidate> candidatesByChunkId = new HashMap<>();
 
-        for (RetrievalEvidence evidence : keywordEvidence) {
+        // Search results are already ranked. Use each engine's original result
+        // position (1-based) rather than incompatible raw similarity/BM25 scores.
+        for (int i = 0; i < keywordEvidence.size(); i++) {
+            RetrievalEvidence evidence = keywordEvidence.get(i);
             if (evidence == null || evidence.chunkId() == null) {
                 continue;
             }
-
-            candidatesByChunkId.put(
+            candidatesByChunkId.putIfAbsent(
                     evidence.chunkId().value(),
-                    HybridCandidate.fromKeyword(evidence)
+                    HybridCandidate.fromKeyword(evidence, i + 1)
             );
         }
 
-        for (RetrievalEvidence evidence : vectorEvidence) {
+        for (int i = 0; i < vectorEvidence.size(); i++) {
+            RetrievalEvidence evidence = vectorEvidence.get(i);
             if (evidence == null || evidence.chunkId() == null) {
                 continue;
             }
-
             candidatesByChunkId.merge(
                     evidence.chunkId().value(),
-                    HybridCandidate.fromVector(evidence),
+                    HybridCandidate.fromVector(evidence, i + 1),
                     HybridCandidate::merge
             );
         }
@@ -188,9 +194,9 @@ public class HybridDocumentRetriever {
                         candidate.text(),
                         candidate.pageStart(),
                         candidate.pageEnd(),
-                        retrievalScoreMerger.merge(
-                                candidate.keywordScore(),
-                                candidate.vectorScore()
+                        retrievalScoreMerger.mergeRanks(
+                                candidate.keywordRank(),
+                                candidate.vectorRank()
                         )
                 ))
                 .toList();
@@ -333,11 +339,11 @@ public class HybridDocumentRetriever {
             String text,
             int pageStart,
             int pageEnd,
-            double keywordScore,
-            double vectorScore
+            Integer keywordRank,
+            Integer vectorRank
     ) {
 
-        private static HybridCandidate fromKeyword(RetrievalEvidence evidence) {
+        private static HybridCandidate fromKeyword(RetrievalEvidence evidence, int rank) {
             return new HybridCandidate(
                     evidence.documentId(),
                     evidence.chunkId(),
@@ -346,12 +352,12 @@ public class HybridDocumentRetriever {
                     evidence.text(),
                     evidence.pageStart(),
                     evidence.pageEnd(),
-                    evidence.relevanceScore(),
-                    0.0
+                    rank,
+                    null
             );
         }
 
-        private static HybridCandidate fromVector(RetrievalEvidence evidence) {
+        private static HybridCandidate fromVector(RetrievalEvidence evidence, int rank) {
             return new HybridCandidate(
                     evidence.documentId(),
                     evidence.chunkId(),
@@ -360,8 +366,8 @@ public class HybridDocumentRetriever {
                     evidence.text(),
                     evidence.pageStart(),
                     evidence.pageEnd(),
-                    0.0,
-                    evidence.relevanceScore()
+                    null,
+                    rank
             );
         }
 
@@ -374,8 +380,8 @@ public class HybridDocumentRetriever {
                     firstNonBlank(text, other.text),
                     pageStart > 0 ? pageStart : other.pageStart,
                     pageEnd > 0 ? pageEnd : other.pageEnd,
-                    Math.max(keywordScore, other.keywordScore),
-                    Math.max(vectorScore, other.vectorScore)
+                    keywordRank != null ? keywordRank : other.keywordRank,
+                    vectorRank != null ? vectorRank : other.vectorRank
             );
         }
     }

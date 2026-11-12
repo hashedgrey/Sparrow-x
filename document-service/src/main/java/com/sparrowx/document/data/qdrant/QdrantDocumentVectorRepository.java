@@ -45,6 +45,17 @@ public class QdrantDocumentVectorRepository {
             int limit,
             Set<DocumentId> documentIds
     ) {
+        return search(tenantId, null, null, query, limit, documentIds);
+    }
+
+    public List<VectorSearchHit> search(
+            TenantId tenantId,
+            ProjectId projectId,
+            TeamId teamId,
+            SearchQueryText query,
+            int limit,
+            Set<DocumentId> documentIds
+    ) {
         validate(tenantId, query);
 
         if (!properties.enabled()) {
@@ -69,7 +80,7 @@ public class QdrantDocumentVectorRepository {
             body.put("limit", safeLimit);
             body.put("with_payload", true);
             body.put("with_vector", false);
-            body.put("filter", buildFilter(tenantId, documentIds));
+            body.put("filter", buildFilter(tenantId, projectId, teamId, documentIds));
 
             Map<?, ?> response = qdrantRestTemplate.postForObject(
                     url,
@@ -90,6 +101,8 @@ public class QdrantDocumentVectorRepository {
 
     private Map<String, Object> buildFilter(
             TenantId tenantId,
+            ProjectId projectId,
+            TeamId teamId,
             Set<DocumentId> documentIds
     ) {
         List<Map<String, Object>> must = new ArrayList<>();
@@ -98,6 +111,19 @@ public class QdrantDocumentVectorRepository {
                 "key", "tenant_id",
                 "match", Map.of("value", tenantId.value())
         ));
+
+        if (projectId != null && projectId.value() != null && !projectId.value().isBlank()) {
+            must.add(Map.of(
+                    "key", "project_id",
+                    "match", Map.of("value", projectId.value())
+            ));
+        }
+        if (teamId != null && teamId.value() != null && !teamId.value().isBlank()) {
+            must.add(Map.of(
+                    "key", "team_id",
+                    "match", Map.of("value", teamId.value())
+            ));
+        }
 
         if (documentIds != null && !documentIds.isEmpty()) {
             List<String> ids = documentIds.stream()

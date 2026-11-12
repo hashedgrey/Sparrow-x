@@ -39,6 +39,8 @@ public class KeywordDocumentSearcher {
 
             return keywordRepository.search(
                             request.tenantId(),
+                            request.projectId(),
+                            request.teamId(),
                             request.query(),
                             safeLimit,
                             request.documentIds() == null ? Set.of() : request.documentIds()

@@ -2,55 +2,28 @@ package com.sparrowx.document.retrieval;
 
 import org.springframework.stereotype.Component;
 
+/**
+ * Rank-based fusion avoids mixing Elasticsearch BM25 scores with vector scores.
+ * Ranks are 1-based; null means the chunk was not returned by that engine.
+ * The [0,1] scaling keeps downstream relevanceScore consumers compatible but
+ * represents neither confidence nor probability of relevance.
+ */
 @Component
 public class RetrievalScoreMerger {
 
-    private static final double DEFAULT_KEYWORD_WEIGHT = 0.45;
-    private static final double DEFAULT_VECTOR_WEIGHT = 0.55;
+    private static final int RRF_K = 60;
+    private static final double KEYWORD_WEIGHT = 0.45;
+    private static final double VECTOR_WEIGHT = 0.55;
 
-    public double merge(double keywordScore, double vectorScore) {
-        return merge(
-                keywordScore,
-                vectorScore,
-                DEFAULT_KEYWORD_WEIGHT,
-                DEFAULT_VECTOR_WEIGHT
-        );
-    }
-
-    public double merge(
-            double keywordScore,
-            double vectorScore,
-            double keywordWeight,
-            double vectorWeight
-    ) {
-        double safeKeywordScore = clamp(keywordScore);
-        double safeVectorScore = clamp(vectorScore);
-
-        double safeKeywordWeight = Math.max(0.0, keywordWeight);
-        double safeVectorWeight = Math.max(0.0, vectorWeight);
-
-        double totalWeight = safeKeywordWeight + safeVectorWeight;
-        if (totalWeight == 0.0) {
-            return 0.0;
+    public double mergeRanks(Integer keywordRank, Integer vectorRank) {
+        double score = 0.0;
+        if (keywordRank != null && keywordRank > 0) {
+            score += KEYWORD_WEIGHT / (RRF_K + keywordRank);
         }
-
-        return ((safeKeywordScore * safeKeywordWeight)
-                + (safeVectorScore * safeVectorWeight)) / totalWeight;
-    }
-
-    private double clamp(double score) {
-        if (Double.isNaN(score) || Double.isInfinite(score)) {
-            return 0.0;
+        if (vectorRank != null && vectorRank > 0) {
+            score += VECTOR_WEIGHT / (RRF_K + vectorRank);
         }
-
-        if (score < 0.0) {
-            return 0.0;
-        }
-
-        if (score > 1.0) {
-            return 1.0;
-        }
-
-        return score;
+        // A chunk ranked first in both lists receives 1.0.
+        return (RRF_K + 1) * score;
     }
 }

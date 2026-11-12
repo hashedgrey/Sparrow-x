@@ -42,6 +42,17 @@ public class ElasticsearchDocumentKeywordRepository {
             int limit,
             Set<DocumentId> documentIds
     ) {
+        return search(tenantId, null, null, query, limit, documentIds);
+    }
+
+    public List<KeywordSearchHit> search(
+            TenantId tenantId,
+            ProjectId projectId,
+            TeamId teamId,
+            SearchQueryText query,
+            int limit,
+            Set<DocumentId> documentIds
+    ) {
         validate(tenantId, query);
 
         try {
@@ -61,6 +72,19 @@ public class ElasticsearchDocumentKeywordRepository {
                             .field("tenant_id")
                             .value(tenantId.value())
                     ));
+
+                    if (projectId != null && projectId.value() != null && !projectId.value().isBlank()) {
+                        bool.filter(filter -> filter.term(term -> term
+                                .field("project_id")
+                                .value(projectId.value())
+                        ));
+                    }
+                    if (teamId != null && teamId.value() != null && !teamId.value().isBlank()) {
+                        bool.filter(filter -> filter.term(term -> term
+                                .field("team_id")
+                                .value(teamId.value())
+                        ));
+                    }
 
                     if (documentIds != null && !documentIds.isEmpty()) {
                         List<FieldValue> ids = documentIds.stream()

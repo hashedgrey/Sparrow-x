@@ -14,6 +14,7 @@ public class DocumentReranker {
     private static final int DEFAULT_LIMIT = 10;
     private static final int MAX_LIMIT = 50;
 
+    // Score-based final selection only; no cross-encoder or query-aware re-scoring.
     public List<RetrievalEvidence> rerank(
             SearchQueryText query,
             List<RetrievalEvidence> evidence,
@@ -29,7 +30,9 @@ public class DocumentReranker {
                 .filter(Objects::nonNull)
                 .filter(item -> item.documentId() != null)
                 .filter(item -> item.chunkId() != null)
-                .sorted(Comparator.comparingDouble(RetrievalEvidence::relevanceScore).reversed())
+                .sorted(Comparator.comparingDouble(RetrievalEvidence::relevanceScore)
+                        .reversed()
+                        .thenComparing(item -> item.chunkId().value()))
                 .limit(safeLimit)
                 .toList();
     }
