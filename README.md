@@ -7,6 +7,8 @@
 
 **SparrowX** is an internal knowledge and agentic investigation platform for engineering organizations. It combines structured company context, document intelligence, bounded semantic decisions, goal-directed execution and verifiable evidence in a single assistant.
 
+>Think of the intelligence behind enterprise AI platforms like Glean and Moveworks. This is the perspective as one of the Agentic Engineers building and maintaining it.
+
 ![SparrowX runtime traffic flow](resources/sp-architecture-flow.gif)
 
 ## Capabilities
@@ -14,7 +16,8 @@
 - **Internal knowledge discovery** — resolve service owners, engineers, teams, repositories, dependencies, architecture documents and runbooks.
 - **Evidence-backed investigations** — connect incident reports, operating procedures and company relationships; identify supported findings and unresolved questions.
 - **Operational analysis** — compare deployment practices, documented standards and incident history; produce grounded assessments and recommendations.
-- **Observable agent execution** — inspect mission status, action selection, goal reviews, evidence acquisition, model usage, traces and streamed results.
+- **Observable agent execution** — inspect JEV-scored evidence candidates, Embabel-selected actions, goal reviews, evidence acquisition, model usage, traces and streamed results.
+- **Document intelligence** — upload source documents, track ingestion jobs, and retrieve project/team-scoped evidence using hybrid keyword/vector ranking.
 - **Durable missions** — persist mission identity and execution inputs, coordinate retries and approvals, and support cancellation through Temporal.
 
 SparrowX retrieves and reasons over authorized internal sources. A security-oriented question is not itself proof of a detected intrusion: incident detection and telemetry correlation require the corresponding data sources and integrations.
@@ -23,16 +26,19 @@ SparrowX retrieves and reasons over authorized internal sources. A security-orie
 
 | Component | Responsibility | Runtime |
 |---|---|---|
-| **Agentic Service** (`agenticsvc`) | Mission submission, intent classification, bounded decisions, Embabel planning, governance, execution and synthesis | Spring Boot; HTTP + gRPC |
+| **Agentic Service** (`agenticsvc`) | Mission submission, frozen authorization and intent, JEV goal/utility evaluation, Embabel action selection, evidence admission and synthesis | Spring Boot; HTTP + gRPC |
 | **Internal Service** (`intsvc`) | Engineers, teams, modules, repositories, ownership, runbooks and organizational graph context | Spring Boot; PostgreSQL + Neo4j |
-| **Document Service** (`docsvc`) | Ingestion, extraction, chunking, semantic/keyword retrieval, citations, evidence graphs and DICE proposition workflows | Spring Boot; PostgreSQL + MinIO + Qdrant + Elasticsearch + Neo4j |
+| **Document Service** (`docsvc`) | HTTP/gRPC ingestion and job status, extraction, DICE proposition embedding, scoped keyword/vector retrieval, rank fusion, citations and evidence graphs | Spring Boot; PostgreSQL + MinIO + Qdrant + Elasticsearch + Neo4j |
 | **Building Blocks** (`bb`) | Shared command/query handling, validation, resilience, context propagation and observability primitives | Maven library, not a running service |
+| **Chat UI** (`chat-ui`) | Query Studio, streaming Chat/Steps, architecture walkthrough and development-only document upload proxy | Next.js / React |
 
 ```mermaid
 flowchart LR
     UI[Assistant UI] <-->|HTTP / SSE| AG[Agentic Service]
+    UI -->|Upload / job status| WEB[Next.js document proxy]
+    WEB -->|HTTP| DOC[Document Service]
     AG <-->|gRPC| IN[Internal Service]
-    AG <-->|gRPC| DOC[Document Service]
+    AG <-->|gRPC| DOC
     AG <-->|Workflow activities| TEMP[Temporal]
     IN --> PG[(PostgreSQL)]
     IN --> NEO[(Neo4j)]
@@ -56,14 +62,15 @@ System 1 evaluates known, typed questions against the current mission state. It 
 
 - **Provider:** Glide or Jev.
 - **Intent:** determine required evidence sources, FAST versus RESEARCH execution path and GOAP versus HYBRID planner mode.
-- **Utility:** assess the marginal value of known capabilities using available evidence and mission constraints.
-- **Uncertainty:** intent classification applies explicit conservative policies when bounded answers are unavailable; eligible utility assessments may escalate unresolved fields to a structured LLM.
+- **Goal review:** evaluate whether the original mission is satisfied, still needs evidence or is blocked/ambiguous.
+- **Utility:** independently score the marginal value of eligible document, internal-search and company-graph actions using typed `NoulQuestion` judgments.
+- **Uncertainty:** intent uses explicit conservative policy fallbacks; missing or low-confidence bounded judgments are **not** reclassified by a generative LLM. Required, authorized evidence sources retain a deterministic minimum utility floor.
 
-Intent decisions and generative LLM operations have different responsibilities. An LLM does not override source-authorization rules or select the intent's planner policy.
+`MissionGoalReviewComponent` prepares scored candidate proposals after Java checks authorization, graph prerequisites and budgets. It uses a shared evidence-action cost of `0.05`, an executable-utility threshold of `0.06` and a required-source utility floor of `0.10`. A single eligible action follows a deterministic path. Only explicitly generative work—such as constructing a new evidence subquery after an earlier query was executed—uses an LLM. The LLM neither chooses execution actions nor certifies the result.
 
 ### System 2 — goal-directed planning and review
 
-Embabel executes registered actions using **GOAP** or **HYBRID** planning, with dynamic action eligibility and values derived from mission state. The agent maintains one terminal goal—produce a grounded result or a truthful unresolved outcome—and repeatedly evaluates whether additional evidence is warranted.
+Embabel executes registered actions using **GOAP** or **HYBRID** planning, with dynamic action eligibility and values derived from mission state. **JEV evaluates candidate utility; Embabel chooses which eligible action to execute.** The reviewer's `nextAction` is only a preview, not an execution record. The agent maintains one terminal goal—produce a grounded result or a truthful unresolved outcome—and repeatedly evaluates whether additional evidence is warranted.
 
 ```mermaid
 flowchart TD
@@ -71,20 +78,21 @@ flowchart TD
     B --> C[Persist mission and checkpoints]
     C --> D[Temporal workflow]
     D --> E[Embabel: register goal]
-    E --> F[Review evidence and goal]
+    E --> F[JEV goal review + independent utility scores]
     F --> G{Goal review}
-    G -->|Need evidence| H[Select eligible capability]
+    G -->|Need evidence| H[Embabel selects eligible scored action]
     H --> I[Document / internal / graph action]
     I --> F
-    G -->|Ready or satisfied| J[Synthesis and grounding]
-    G -->|Blocked or ambiguous| K[Unresolved outcome]
-    J --> L[Persist and stream result]
+    G -->|Ready or satisfied| J[Admit evidence + synthesize]
+    G -->|Blocked or ambiguous| K[Grounded partial or unresolved result]
+    J --> N{Final goal certification}
+    N --> L[Persist and stream result]
     K --> L
     D -.->|Approval required| M[Human review gate]
     M -.-> D
 ```
 
-The execution path depends on the mission and evidence encountered; action count and ordering are not hard-coded. **FAST and RESEARCH both use Temporal** in this runtime. The labels *System 1* and *System 2* describe engineering roles, not access to an LLM's private reasoning.
+The execution path depends on the mission and evidence encountered; action count and ordering are not hard-coded. **FAST and RESEARCH both use Temporal** in this runtime. Graph queries use root-scoped validation and a shared batch deadline; an updated root search cannot inherit an older graph proof. Evidence admission and `goalCertified` determine the final goal event, not merely a reviewer's `SATISFIED` vote. The labels *System 1* and *System 2* describe engineering roles, not access to an LLM's private reasoning.
 
 Read [Agent decisions](docs/architecture/agent-decisions.md) for confidence, utility, GOAP/HYBRID and review semantics.
 
@@ -135,6 +143,22 @@ Read [Agent decisions](docs/architecture/agent-decisions.md) for confidence, uti
 * **`docsvc`** retrieves company deployment standards, service procedures, architecture documents, incident reports, and runbooks.
 * **`agenticsvc`** compares documented practices against requirements, identifies recurring issues and evidence gaps, and produces a cited risk assessment with recommended follow-up actions and responsible owners.
 
+
+## Document retrieval and ingestion
+
+- **Scoped retrieval:** keyword search (Elasticsearch) and vector search (Qdrant) accept tenant, optional project/team and optional document-ID filters.
+- **Hybrid ranking:** overfetches candidates from both engines and uses weighted reciprocal rank fusion (RRF), rather than combining incomparable BM25 and vector scores. Final selection is deterministic; the fused score is a ranking signal, **not a calibrated relevance probability**.
+- **DICE ingestion:** can precompute proposition embeddings in provider-supported batches before ordinary proposition persistence. The batch cache is scoped to ingestion, not shared across tenants; optional embedding timing logs aid local profiling.
+- **HTTP document lifecycle:** Document Service exposes `POST /api/documents` and `GET /api/documents/jobs/{jobId}` for uploads and ingestion progress. The Chat UI proxies those endpoints and displays upload/job status; supported UI formats are PDF, TXT, MD and DOCX (up to 20 MB per file).
+
+**Development-only upload boundary:** The bundled Next.js proxy is disabled in production and requires `DOCUMENT_UPLOAD_ENABLED=true`, `DOCUMENT_SERVICE_HTTP_URL`, `DOCUMENT_SERVICE_BASIC_USER` and `DOCUMENT_SERVICE_BASIC_PASSWORD`. Document Service uses a server-configured tenant/project/team context with the authenticated principal, not user-supplied tenant headers. This integration is **not a production multi-tenant authentication design**; deploy behind verified identity and tenant authorization before broader exposure.
+
+## Query Studio and walkthrough
+
+The Chat UI keeps its conversation mounted while switching between **Chat** and **Steps** in Query Studio. With **Auto-show steps** enabled, the transition waits for a real trace update or nonempty streamed answer rather than merely a submitted request. The separate architecture walkthrough explains component roles and recorded call boundaries; its reveal sequence is not proof of which Java methods executed in a mission.
+
+Mission traces distinguish `MISSION_ACTION_UTILITY` (candidate score), `MISSION_ACTION_RECOMMENDATION` (reviewer preview), `MISSION_ACTION_SELECTED` (Embabel selection), and the subsequent capability attempt. A trace event is not automatically an OpenTelemetry span or browser-visible SSE field; visibility depends on projection/exporter wiring.
+
 ---
 
 ## Quick start
@@ -157,7 +181,7 @@ docker compose -f docker-compose.infrastructure.yaml up -d \
   postgres temporal temporal-ui kafka neo4j minio qdrant elasticsearch keycloak
 ```
 
-The Compose file also defines optional observability and supporting services, including Grafana, Prometheus, Alloy, Loki, Tempo, Redis and Cassandra. Start only the services required for the workflow being exercised. The full stack is memory-intensive.
+The Compose file also defines optional observability and supporting services, including Grafana, Prometheus, Alloy, Loki, Tempo, **Kibana**, Redis and Cassandra. Start only the services required for the workflow being exercised. The full stack is memory-intensive.
 
 On first initialization of an **empty PostgreSQL data volume**, the mounted `postgres-init-scripts/` directory creates the SparrowX schema and Keycloak database. Temporal manages its own database initialization. **Existing PostgreSQL volumes are not reinitialized automatically.** See [Database setup](docs/setup/postgresql.md).
 
@@ -196,7 +220,7 @@ mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8081"
 mvn spring-boot:run
 ```
 
-Configure provider keys and endpoint variables in your shell or IDE run configuration before starting the services. With the default Jev provider, `TYPESAFE_API_KEY` is required at startup. Other configured model and embedding integrations require their own credentials. The document HTTP override avoids a collision with cAdvisor on port 8080.
+Configure provider keys and endpoint variables in your shell or IDE run configuration before starting the services. With the default Jev provider, `TYPESAFE_API_KEY` is required at startup. Other configured model and embedding integrations require their own credentials. The document HTTP override avoids a collision with cAdvisor on port 8080. HTTP upload endpoints use the service's configured authentication and tenant context; the local Next.js proxy requires its own development-only configuration.
 
 | Service | HTTP | gRPC |
 |---|---:|---:|
@@ -205,6 +229,7 @@ Configure provider keys and endpoint variables in your shell or IDE run configur
 | Agentic Service | 8086 | 50056 |
 | Temporal UI | 8233 | — |
 | Grafana (optional) | 3000 | — |
+| Kibana (optional; Elasticsearch UI) | 5601 | — |
 
 Test service readiness:
 
@@ -240,8 +265,9 @@ See [Investigation walkthrough](docs/missions/credential-exposure.md).
 
 SparrowX exposes operational events at two levels:
 
-- **Mission telemetry:** persisted mission progress, goal evaluations, action events and decision traces, projected to the assistant through SSE.
-- **Infrastructure telemetry:** application traces to Alloy → Tempo and configured Langfuse Cloud; Agentic Service file logs to Loki; configured Prometheus scrapes and Grafana visualization.
+- **Mission telemetry:** persisted mission progress, independently scored candidates, Embabel action selections, goal evaluations, attempts and final certification, projected to the assistant through SSE when allowlisted.
+- **Infrastructure telemetry:** application OpenTelemetry spans to Alloy → Tempo and configured Langfuse Cloud; Agentic Service file logs to Loki; configured Prometheus scrapes and Grafana visualization.
+- **Elasticsearch inspection:** optional Kibana 8.17.0 on `http://localhost:5601` for Elasticsearch data; adding Kibana does **not** by itself send mission logs or traces to Elasticsearch.
 
 The provided Prometheus configuration covers Document Service and a gateway target; add Agentic and Internal Service scrape targets before relying on platform-wide metrics. Langfuse is configured as a **cloud trace destination**, not a locally hosted service.
 
@@ -249,23 +275,23 @@ See [Execution traces](docs/observability/execution-traces.md) and [Telemetry](d
 
 ## Security and data handling
 
-Mission execution applies tool and source authorization, grounding policies, execution budgets and human-approval controls where required. Document contents and model prompts should not be exposed through telemetry by default; the agent configuration disables message-content capture.
+Mission execution applies frozen effective tool/source grants, evidence grounding, execution budgets and human-approval controls where required. An empty effective tool grant is **deny**, not unrestricted access; neither a JEV score nor a human approval expands authorization. Document contents and model prompts should not be exposed through telemetry by default; the agent configuration disables message-content capture.
 
 The bundled infrastructure values are intended for isolated **local development**. Replace default passwords, restrict network exposure, configure authentication and TLS, and establish data retention and backup policies before deploying into a shared environment.
 
 ## Technology
 
-Java 24/25 · Spring Boot 4.1.1 · Maven · Embabel · Temporal · gRPC · PostgreSQL · Neo4j · MinIO · Qdrant · Elasticsearch · Kafka · DICE · OpenTelemetry · Alloy · Tempo · Loki · Prometheus · Grafana · Langfuse Cloud
+Java 24/25 · Spring Boot 4.1.1 · Maven · Next.js / React · Embabel · Temporal · gRPC · PostgreSQL · Neo4j · MinIO · Qdrant · Elasticsearch · Kibana · Kafka · DICE · OpenTelemetry · Alloy · Tempo · Loki · Prometheus · Grafana · Langfuse Cloud
 
 ## Documentation
 
 | Guide | Coverage |
 |---|---|
-| [Agent decisions](docs/architecture/agent-decisions.md) | System 1, System 2, GOAP/HYBRID and goal review |
+| [Agent decisions](docs/architecture/agent-decisions.md) | Typed JEV judgments, utility proposals, Embabel GOAP/HYBRID selection and goal review |
 | [Mission runtime](docs/architecture/mission-runtime.md) | Persistence, Temporal, checkpoints, approvals and cancellation |
 | [Local development](docs/setup/local-development.md) | Docker infrastructure, Maven builds and service startup |
 | [Configuration](docs/setup/configuration.md) | Model providers, ports and environment settings |
 | [PostgreSQL](docs/setup/postgresql.md) | Schema initialization, validation and existing-volume handling |
 | [Investigation walkthrough](docs/missions/credential-exposure.md) | End-to-end example and evidence expectations |
-| [Execution traces](docs/observability/execution-traces.md) | Events, SSE contract and UI graph interpretation |
-| [Telemetry](docs/observability/telemetry.md) | OTLP, Tempo, Langfuse, Loki, Prometheus and Grafana |
+| [Execution traces](docs/observability/execution-traces.md) | Candidate/selection events, SSE contract, final certification and UI graph interpretation |
+| [Telemetry](docs/observability/telemetry.md) | OTLP, Tempo, Langfuse, Loki, Prometheus, Grafana and Kibana |
