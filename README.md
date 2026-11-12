@@ -69,31 +69,35 @@ System 1 evaluates known, typed questions against the current mission state. It 
 
 `MissionGoalReviewComponent` prepares scored candidate proposals after Java checks authorization, graph prerequisites and budgets. It uses a shared evidence-action cost of `0.05`, an executable-utility threshold of `0.06` and a required-source utility floor of `0.10`. A single eligible action follows a deterministic path. Only explicitly generative work—such as constructing a new evidence subquery after an earlier query was executed—uses an LLM. The LLM neither chooses execution actions nor certifies the result.
 
-### System 2 — goal-directed planning and review
+### System 2 — Goal-directed planning, LLM escalation and evidence review
 
-Embabel executes registered actions using **GOAP** or **HYBRID** planning, with dynamic action eligibility and values derived from mission state. **JEV evaluates candidate utility; Embabel chooses which eligible action to execute.** The reviewer's `nextAction` is only a preview, not an execution record. The agent maintains one terminal goal—produce a grounded result or a truthful unresolved outcome—and repeatedly evaluates whether additional evidence is warranted.
+Embabel executes registered actions using **GOAP** or **HYBRID** planning, with dynamic action eligibility and utility values derived from the mission's evolving evidence state.
+
+**System 1 (JEV/Glide)** evaluates goal satisfaction and estimates the marginal utility of eligible evidence capabilities. **Embabel** uses these assessments to select and execute actions while Java enforces authorization, prerequisites and execution budgets.
+
+When the original query has already been attempted but evidence remains insufficient, **generative LLM escalation** can produce a distinct, targeted follow-up subquery for an eligible capability. The LLM refines *what to investigate next*, not *which tool to execute* or *whether the goal is satisfied*.
 
 ```mermaid
 flowchart TD
-    A[Submit mission] --> B[Validate and classify intent]
-    B --> C[Persist mission and checkpoints]
-    C --> D[Temporal workflow]
-    D --> E[Embabel: register goal]
-    E --> F[JEV goal review + independent utility scores]
-    F --> G{Goal review}
-    G -->|Need evidence| H[Embabel selects eligible scored action]
-    H --> I[Document / internal / graph action]
-    I --> F
-    G -->|Ready or satisfied| J[Admit evidence + synthesize]
-    G -->|Blocked or ambiguous| K[Grounded partial or unresolved result]
-    J --> N{Final goal certification}
-    N --> L[Persist and stream result]
-    K --> L
-    D -.->|Approval required| M[Human review gate]
-    M -.-> D
+    A[Register mission goal] --> B[System 1: Evaluate goal and evidence]
+    B --> C{Goal status}
+    C -->|Needs evidence| D[System 1: Score eligible capabilities]
+    D --> E[Embabel: Select action using GOAP/HYBRID]
+    E --> F{Original query already attempted?}
+    F -->|No| G[Execute original query]
+    F -->|Yes| H[LLM: Generate distinct follow-up subquery]
+    H --> I[Execute authorized capability]
+    G --> J[Update evidence and blackboard]
+    I --> J
+    J --> B
+    C -->|Satisfied or ready| K[Grounded synthesis and validation]
+    C -->|Blocked or ambiguous| L[Unresolved outcome]
+    K --> M[Final mission result]
+    L --> M
 ```
 
-The execution path depends on the mission and evidence encountered; action count and ordering are not hard-coded. **FAST and RESEARCH both use Temporal** in this runtime. Graph queries use root-scoped validation and a shared batch deadline; an updated root search cannot inherit an older graph proof. Evidence admission and `goalCertified` determine the final goal event, not merely a reviewer's `SATISFIED` vote. The labels *System 1* and *System 2* describe engineering roles, not access to an LLM's private reasoning.
+The execution loop continues until the goal is satisfied, evidence is exhausted, or an execution constraint prevents further progress. **Generative escalation never overrides System 1's bounded judgments, Embabel's action selection, or deterministic governance rules.**
+
 
 Read [Agent decisions](docs/architecture/agent-decisions.md) for confidence, utility, GOAP/HYBRID and review semantics.
 
