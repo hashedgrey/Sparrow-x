@@ -25,10 +25,9 @@ import org.slf4j.LoggerFactory;
  *
  * System-1 is the default for bounded typed decisions.
  *
- * The structured LLM is used only when:
- *
- * - a bounded answer is insufficiently confident; or
- * - a field explicitly requires open-ended semantic extraction.
+ * Bounded JEV answers are accepted only above the configured confidence gate.
+ * An uncertain bounded answer is unresolved, never reclassified by an LLM.
+ * A structured LLM is invoked only for explicitly generative output fields.
  */
 public final class SemanticDecisionService {
 
@@ -62,38 +61,41 @@ public final class SemanticDecisionService {
                 "request must not be null"
         );
 
-        // No model-generated placeholder decisions. If System-1 is unavailable,
-        // escalate every requested bounded field using the provided schema.
+        // Do not ask a generative model to reclassify a bounded decision.
+        // If JEV is unavailable or uncertain, fail explicitly. The caller may
+        // apply a conservative policy, but must not present it as a JEV vote.
         DecisionResponse bounded;
-        boolean systemOneUnavailable = false;
         long started = System.nanoTime();
         try {
             bounded = systemOne.evaluate(request.state(), request.questions());
             LOG.info("semantic.system1.complete fields={} elapsedMs={}",
                     request.questions().size(), elapsed(started));
         } catch (RuntimeException ex) {
-            if (request.escalation() == null) throw ex;
             LOG.warn("semantic.system1.unavailable elapsedMs={} type={}",
                     elapsed(started), ex.getClass().getSimpleName());
-            // Represents the failed call, with zero answers. It cannot resolve a field.
-            bounded = new DecisionResponse("system-one-unavailable", "", "", Map.of());
-            systemOneUnavailable = true;
+            MissionDecisionTraceContext.event("JEV_UNAVAILABLE", "Jev execution unavailable",
+                    Map.of("reasonCode", ex.getClass().getSimpleName()));
+            throw new IllegalStateException("JEV bounded decision unavailable; no LLM escalation", ex);
         }
 
         MissionDecisionTraceContext.votes(bounded, request.questions(), request.minimumSystemOneConfidence());
-        Set<String> fieldsToEscalate = escalationFields(request, bounded);
-        if (systemOneUnavailable) {
-            fieldsToEscalate = new LinkedHashSet<>(fieldsToEscalate);
-            fieldsToEscalate.addAll(request.questions().keySet());
-            fieldsToEscalate = Set.copyOf(fieldsToEscalate);
+        Set<String> unresolved = new LinkedHashSet<>(escalationFields(request, bounded));
+        unresolved.removeAll(request.llmOnlyFields());
+        if (!unresolved.isEmpty()) {
+            MissionDecisionTraceContext.event("JEV_UNRESOLVED", "Jev bounded decision unresolved",
+                    Map.of("fieldCount", Integer.toString(unresolved.size()),
+                            "decision", "UNRESOLVED"));
+            throw new IllegalStateException(
+                    "JEV bounded decision unresolved (no LLM fallback): " + unresolved);
         }
 
+        // Only fields explicitly declared generative may reach the LLM.
+        Set<String> fieldsToEscalate = request.llmOnlyFields();
         if (fieldsToEscalate.isEmpty()) {
             MissionDecisionTraceContext.event("JEV_ACCEPTED", "Jev resolved bounded fields",
-                    Map.of("fieldCount", Integer.toString(request.questions().size()), "decision", "ACCEPTED"));
-            return Result.systemOneOnly(
-                    bounded
-            );
+                    Map.of("fieldCount", Integer.toString(request.questions().size()),
+                            "decision", "ACCEPTED"));
+            return Result.systemOneOnly(bounded);
         }
 
         Escalation escalation =
@@ -101,14 +103,13 @@ public final class SemanticDecisionService {
 
         if (escalation == null) {
             throw new IllegalStateException(
-                    "Semantic fields require LLM escalation but "
-                            + "no escalation configuration was supplied: "
+                    "Generative fields require an LLM configuration: "
                             + fieldsToEscalate
             );
         }
 
-        MissionDecisionTraceContext.event("LLM_ESCALATION", "Escalate unresolved fields",
-                Map.of("reasonCode", systemOneUnavailable ? "JEV_UNAVAILABLE" : "LOW_CONFIDENCE_OR_UNRESOLVED",
+        MissionDecisionTraceContext.event("LLM_ESCALATION", "Generate explicitly unbounded fields",
+                Map.of("reasonCode", "GENERATIVE_FIELDS_REQUIRED",
                         "escalatedCount", Integer.toString(fieldsToEscalate.size())));
         LlmDecisionEngine.Result llmResult =
                 escalate(
@@ -154,6 +155,28 @@ public final class SemanticDecisionService {
             double minimumConfidence,
             String operation
     ) {
+        return evaluateBounded(state, questions, minimumConfidence, operation, true);
+    }
+
+    /** Retain each valid, confident answer when the questions can be evaluated independently. */
+    public Map<String, DecisionAnswer> tryIndependentBounded(
+            Map<String, Object> state,
+            Map<String, ? extends DecisionQuestion> questions,
+            double minimumConfidence,
+            String operation
+    ) {
+        return evaluateBounded(state, questions, minimumConfidence, operation, false)
+                .map(DecisionResponse::answers)
+                .orElseGet(Map::of);
+    }
+
+    private Optional<DecisionResponse> evaluateBounded(
+            Map<String, Object> state,
+            Map<String, ? extends DecisionQuestion> questions,
+            double minimumConfidence,
+            String operation,
+            boolean requireAll
+    ) {
         Objects.requireNonNull(state, "state");
         Objects.requireNonNull(questions, "questions");
         if (questions.isEmpty()) return Optional.empty();
@@ -165,33 +188,35 @@ public final class SemanticDecisionService {
         try {
             DecisionResponse response = systemOne.evaluate(state, questions);
             MissionDecisionTraceContext.votes(response, questions, minimumConfidence);
+            Map<String, DecisionAnswer> accepted = new LinkedHashMap<>();
             for (var entry : questions.entrySet()) {
-                DecisionAnswer answer = response.answers().get(entry.getKey());
-                DecisionQuestion question = entry.getValue();
-                if (answer == null || !validAnswer(question, answer)
-                        || !Double.isFinite(confidence(answer))
-                        || confidence(answer) < minimumConfidence) {
-                    LOG.warn(
-                            "JEV rejected operation={} field={} answer={} threshold={}",
-                            operation,
-                            entry.getKey(),
-                            answer,
-                            minimumConfidence
-                    );
-                    LOG.info("semantic.system1.unresolved operation={} field={} elapsedMs={}",
-                            operation, entry.getKey(), elapsed(started));
-                    MissionDecisionTraceContext.event("JEV_UNRESOLVED", "Jev bounded check unresolved",
-                            Map.of("field", entry.getKey(), "threshold", Double.toString(minimumConfidence),
-                                    "decision", "UNRESOLVED"));
-                    return Optional.empty();
+                String field = entry.getKey();
+                DecisionAnswer answer = response.answers().get(field);
+                if (answer != null && validAnswer(entry.getValue(), answer)
+                        && confidence(answer) >= minimumConfidence) {
+                    accepted.put(field, answer);
+                    continue;
                 }
+                LOG.warn("JEV rejected operation={} field={} answer={} threshold={}",
+                        operation, field, answer, minimumConfidence);
+                LOG.info("semantic.system1.unresolved operation={} field={} elapsedMs={}",
+                        operation, field, elapsed(started));
+                MissionDecisionTraceContext.event("JEV_UNRESOLVED", "Jev bounded check unresolved",
+                        Map.of("field", field, "threshold", Double.toString(minimumConfidence),
+                                "decision", "UNRESOLVED"));
+                if (requireAll) return Optional.empty();
             }
 
-            LOG.info("semantic.system1.resolved operation={} provider={} elapsedMs={}",
-                    operation, response.provider(), elapsed(started));
-            MissionDecisionTraceContext.event("JEV_ACCEPTED", "Jev bounded check accepted",
-                    Map.of("fieldCount", Integer.toString(questions.size()), "decision", "ACCEPTED"));
-            return Optional.of(response);
+            if (accepted.isEmpty()) return Optional.empty();
+            boolean complete = accepted.size() == questions.size();
+            LOG.info("semantic.system1.resolved operation={} provider={} accepted={} requested={} elapsedMs={}",
+                    operation, response.provider(), accepted.size(), questions.size(), elapsed(started));
+            MissionDecisionTraceContext.event("JEV_ACCEPTED",
+                    complete ? "Jev bounded check accepted" : "Jev accepted some independent answers",
+                    Map.of("fieldCount", Integer.toString(accepted.size()),
+                            "decision", complete ? "ACCEPTED" : "PARTIAL"));
+            return Optional.of(requireAll ? response
+                    : new DecisionResponse(response.provider(), response.model(), response.requestId(), accepted));
         } catch (RuntimeException ex) {
             LOG.warn("semantic.system1.failed operation={} elapsedMs={} type={}",
                     operation, elapsed(started), ex.getClass().getSimpleName());
@@ -199,6 +224,24 @@ public final class SemanticDecisionService {
                     Map.of("reasonCode", ex.getClass().getSimpleName()));
             return Optional.empty();
         }
+    }
+
+    /**
+     * Bounded-only decision contract. Low-confidence, unavailable, malformed or
+     * missing JEV answers are unresolved; they are never silently promoted to
+     * facts and never passed to the generative model.
+     *
+     * Call escalate(...) explicitly when the task requires text, arrays or
+     * another output shape that the SystemOne protocol cannot represent.
+     */
+    public DecisionResponse requireBounded(
+            Map<String, Object> state,
+            Map<String, ? extends DecisionQuestion> questions,
+            double minimumConfidence,
+            String operation) {
+        return tryBounded(state, questions, minimumConfidence, operation)
+                .orElseThrow(() -> new IllegalStateException(
+                        "JEV bounded decision unresolved (no LLM fallback): " + operation));
     }
 
     public LlmDecisionEngine.Result escalate(LlmDecisionEngine.Request request) {
@@ -246,6 +289,10 @@ public final class SemanticDecisionService {
     public LlmDecisionEngine.Result escalateAfterJev(LlmDecisionEngine.Request request) {
         Objects.requireNonNull(request, "request");
         Map<String, DecisionQuestion> boundedQuestions = enumQuestions(request);
+        if (boundedQuestions.size() == request.fieldsToResolve().size()) {
+            throw new IllegalArgumentException(
+                    "No generative fields in request; use requireBounded for bounded choices");
+        }
         if (boundedQuestions.isEmpty()) {
             LOG.info("semantic.jev.unexpressible operation={} reason=no-bounded-schema-fields",
                     request.operationId());

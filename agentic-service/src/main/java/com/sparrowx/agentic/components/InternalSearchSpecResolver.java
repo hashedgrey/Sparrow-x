@@ -6,6 +6,7 @@ import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.agentic.planning.InternalRootSelection.*;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceAnswer;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceQuestion;
+import com.sparrowx.agentic.systemone.SystemOneDecisionClient.NoulAnswer;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.NoulQuestion;
 import com.sparrowx.agentic.tools.internal.InternalEntitySearchRequestBuilder.SearchSpec;
 import org.slf4j.Logger;
@@ -27,15 +28,18 @@ import java.util.concurrent.TimeUnit;
 /**
  * Compiles natural-language root requirements into ontology-bound INTSVC searches.
  * JEV is consulted first for bounded selection semantics and ontology types.
- * Unresolved decisions use the existing schema-bound LLM fallback; free-text
- * generation is limited to literal search arguments. Final entity identity is
- * verified by INTSVC, never asserted by either decision model.
+ * Bounded root decisions are JEV-only and abstain rather than escalate to an LLM.
+ * Open-ended literal extraction is LLM-generated, with exact-span checks; final
+ * entity identity is verified by INTSVC, never asserted by either decision model.
  * There are no question-specific names, instruction-verb lexicons or name regexes.
  */
 @Component
 public final class InternalSearchSpecResolver {
     private static final Logger LOG = LoggerFactory.getLogger(InternalSearchSpecResolver.class);
-    private static final double JEV_CONFIDENCE = 0.75d;
+    // Calibrate this value against JEV evaluation data; lower confidence never
+    // silently authorizes a root and is never forwarded to a generative LLM.
+    @Value("${sparrowx.graph.root-jev-min-confidence:0.70}")
+    private double jevMinimumConfidence = 0.70d;
     private static final int MAX_GENERATION_CORRECTIONS = 2;
 
     private final SemanticDecisionService semantic;
@@ -58,6 +62,9 @@ public final class InternalSearchSpecResolver {
 
     public Resolution resolve(Request request) {
         Objects.requireNonNull(request, "request");
+        if (!Double.isFinite(jevMinimumConfidence) || jevMinimumConfidence < 0.5d
+                || jevMinimumConfidence > 1.0d)
+            throw new IllegalStateException("Invalid root JEV confidence threshold");
         long started = System.nanoTime();
         var ontology = ontologyProvider.describe(request.context());
         List<String> types = ontology.fields().keySet().stream().sorted().toList();
@@ -83,15 +90,30 @@ public final class InternalSearchSpecResolver {
                         "EXPLICIT_SET", "Two or more individually named starting entities",
                         "TYPE_SCAN", "All entities of one ontology-defined starting type",
                         "MULTI_TYPE_SCAN", "Independent exhaustive scans over multiple starting types"));
-        Mode mode = Mode.valueOf(choose(request, state, "selectionMode", modeQuestion));
+        // A low-confidence JEV enum is not a root authorization. However, an
+        // unresolved MODE must not abort an otherwise named search before the
+        // textual root arguments have even been extracted. Only the generative
+        // literal extractor may fill that unbounded field; it does NOT choose
+        // a mode, ontology type, relationship or tool.
+        Optional<String> chosenMode = tryChoose(request, state, "selectionMode", modeQuestion);
+        List<String> extractedOnAbstention = chosenMode.isEmpty()
+                ? extractLiteralCandidates(request, state, false) : List.of();
+        if (chosenMode.isEmpty() && extractedOnAbstention.isEmpty())
+            throw new IllegalStateException("JEV root mode unresolved and no grounded root literal was extracted");
+        Mode mode = chosenMode.isPresent() ? Mode.valueOf(chosenMode.get())
+                : extractedOnAbstention.size() == 1 ? Mode.UNIQUE : Mode.EXPLICIT_SET;
+        if (chosenMode.isEmpty())
+            LOG.info("internal.root-mode.recovered missionId={} via=literal-extraction mode={} literals={}",
+                    request.missionId(), mode, extractedOnAbstention.size());
         // JEV can correctly identify an exhaustive answer type while overlooking
         // a separately NAMED entity that restricts that answer set. Before any
         // scan is authorized as the root scope, extract candidate *literal*
         // qualifiers. This does not authorize an entity: IntSvc must verify it.
         boolean qualifierAudited = request.relationshipTraversalRequired()
                 && (mode == Mode.TYPE_SCAN || mode == Mode.MULTI_TYPE_SCAN);
-        List<String> namedQualifiers = qualifierAudited
-                ? extractNamedQualifiers(request, state) : List.of();
+        List<String> namedQualifiers = !extractedOnAbstention.isEmpty()
+                ? extractedOnAbstention
+                : qualifierAudited ? extractLiteralCandidates(request, state, true) : List.of();
         boolean namedQualifierPromotion = !namedQualifiers.isEmpty();
         if (namedQualifierPromotion) {
             mode = namedQualifiers.size() == 1 ? Mode.UNIQUE : Mode.EXPLICIT_SET;
@@ -152,9 +174,11 @@ public final class InternalSearchSpecResolver {
         Plan plan = parsePlan(output, types, request.query()).plan();
 
         Map<String, Object> debug = new LinkedHashMap<>();
-        debug.put("parameterRoute", namedQualifierPromotion ? "jev-mode+llm-qualifier-audit+jev-type"
+        debug.put("parameterRoute", chosenMode.isEmpty() ? "jev-abstained+llm-grounded-literal+jev-type"
+                : namedQualifierPromotion ? "jev-mode+llm-qualifier-audit+jev-type"
                 : generated ? "jev-control-llm-literal-generation"
                 : qualifierAudited ? "jev-scan+llm-qualifier-audit" : "jev-only-scan");
+        debug.put("jevModeCertified", chosenMode.isPresent());
         debug.put("rootSelectionMode", plan.mode().name());
         debug.put("rootQueryCount", plan.queries().size());
         debug.put("namedQualifierAudit", namedQualifierPromotion ? "PROMOTED_TO_EXACT_SEARCH"
@@ -175,20 +199,27 @@ public final class InternalSearchSpecResolver {
      * The generator cannot claim identities or change tool authorization; every
      * returned span is bounded to the frozen original question and verified by IntSvc.
      */
-    private List<String> extractNamedQualifiers(Request request, Map<String, Object> state) {
+    private List<String> extractLiteralCandidates(Request request, Map<String, Object> state,
+                                                   boolean qualifierOnly) {
         int cap = Math.min(maxQueries, 8);
+        String operation = request.requestId() + (qualifierOnly
+                ? ":named-qualifier-audit" : ":unresolved-mode-literals");
+        String task = qualifierOnly
+                ? "Extract named ENTITY literals that explicitly CONSTRAIN the membership, "
+                  + "ownership, association or relationship used to select the answer set. "
+                  + "Return [] when no named relational qualifier is present."
+                : "Extract explicitly named STARTING entity literals or independently "
+                  + "named root entities from originalMission. Do not classify the query, "
+                  + "select a root mode, choose an ontology type, or invent a search scope. "
+                  + "Return [] when no literal starting entity is explicitly named.";
         var answer = semantic.escalate(new LlmDecisionEngine.Request(
-                request.missionId(), request.requestId() + ":named-qualifier-audit",
-                request.requestId() + ":named-qualifier-audit",
-                "Extract named ENTITY literals that explicitly CONSTRAIN the membership, "
-                + "ownership, association, or relationship used to select the requested "
-                + "answer set. Return [] when the mission does not mention such a named "
-                + "qualifier. A qualifying entity may have a DIFFERENT ontology type "
-                + "from the requested output entities. Do not extract generic plural "
-                + "answer categories, professions, sorting instructions, top-N counts, "
-                + "or names that are only output columns. Copy the minimal complete "
-                + "literal substring from originalMission. Do not invent an identity, "
-                + "guess a label, or decide whether the entity exists. Return only the array.",
+                request.missionId(), operation, operation,
+                task + " A starting name may have a DIFFERENT ontology type from the "
+                + "requested answer type. Do not extract generic plural answer categories, "
+                + "professions, sorting instructions, top-N counts, or names that are only "
+                + "output columns. Copy the minimal complete literal substring from "
+                + "originalMission. Do not invent an identity or decide whether the entity "
+                + "exists. Return only the array.",
                 Map.copyOf(state), Set.of("qualifiers"),
                 Map.of("type", "object", "properties", Map.of("qualifiers", Map.of(
                                 "type", "array", "items", Map.of("type", "string"),
@@ -197,7 +228,7 @@ public final class InternalSearchSpecResolver {
                 450, 0.0d, Map.of("component", "internal-named-qualifier-audit")));
         Object raw = answer.output() == null ? null : answer.output().get("qualifiers");
         if (!(raw instanceof List<?> items) || items.size() > cap)
-            throw new IllegalStateException("Named-qualifier audit returned an invalid array");
+            throw new IllegalStateException("Root literal extraction returned an invalid array");
         List<String> qualifiers = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         for (Object item : items) {
@@ -222,51 +253,24 @@ public final class InternalSearchSpecResolver {
 
     private String choose(Request request, Map<String, Object> state,
                           String field, ChoiceQuestion question) {
+        return tryChoose(request, state, field, question)
+                .orElseThrow(() -> new IllegalStateException(
+                        "JEV bounded decision unresolved (no LLM enum fallback): " + field));
+    }
+
+    private Optional<String> tryChoose(Request request, Map<String, Object> state,
+                                       String field, ChoiceQuestion question) {
         String operation = request.requestId() + ":" + field;
         if (state.get("rootSelectionStep") instanceof String step)
             operation += ":" + step;
-        Optional<com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionResponse> answer =
-                semantic.tryBounded(Map.copyOf(state), Map.of(field, question),
-                        JEV_CONFIDENCE, operation);
-        if (answer.isEmpty()) {
-            // A second smaller bounded question can resolve a crowded state.
-            // Only after both attempts abstain does schema-bound LLM fallback run.
-            Map<String, Object> reduced = Map.of(
-                    "mission", request.query(), "allowedOntologyTypes", state.get("availableNodeTypes"));
-            answer = semantic.tryBounded(reduced, Map.of(field, question),
-                    JEV_CONFIDENCE, operation + ":retry");
-        }
-        if (answer.isPresent() && answer.get().answers().get(field) instanceof ChoiceAnswer chosen)
-            return chosen.choice();
-
-        // Both bounded JEV attempts abstained. Reuse the existing structured
-        // escalation boundary instead of recording this as an IntSvc tool failure.
-        // The output remains a single schema-constrained choice, not a free-form
-        // graph plan, and all resulting roots still pass backend verification.
-        Map<String, Object> escalationState = new LinkedHashMap<>(state);
-        escalationState.put("boundedDecisionField", field);
-        escalationState.put("boundedDecisionOptions", question.options());
-        List<String> allowed = new ArrayList<>(question.options().keySet());
-        allowed.add("ABSTAIN");
-        var llmResult = semantic.escalate(new LlmDecisionEngine.Request(
-                request.missionId(), operation + ":llm-fallback",
-                operation + ":llm-fallback",
-                "Resolve only the bounded root-decision field. Use the original mission "
-                        + "and supplied ontology; select a listed option by its description. "
-                        + "Do not invent graph facts or answer the original question. "
-                        + "Return ABSTAIN if the correct option cannot be established.",
-                Map.copyOf(escalationState), Set.of(field),
-                Map.of("type", "object",
-                        "properties", Map.of(field, Map.of("type", "string", "enum", allowed)),
-                        "required", List.of(field), "additionalProperties", false),
-                160, 0.0d, Map.of("component", "internal-root-bounded-fallback")));
-        Object raw = llmResult.output().get(field);
-        if (!(raw instanceof String choice) || !question.options().containsKey(choice))
-            throw new IllegalStateException(
-                    "Root decision unresolved after JEV and structured escalation: " + field);
-        LOG.info("internal.root-decision.escalated missionId={} field={} route={}",
-                request.missionId(), field, llmResult.routeKey());
-        return choice;
+        // Bounded JEV uncertainty stays an abstention, not a forged enum or an
+        // LLM decision. The caller may separately request unbounded text.
+        var response = semantic.tryBounded(Map.copyOf(state), Map.of(field, question),
+                jevMinimumConfidence, operation);
+        if (response.isEmpty()) return Optional.empty();
+        if (!(response.get().answers().get(field) instanceof ChoiceAnswer answer))
+            return Optional.empty();
+        return Optional.of(answer.choice());
     }
 
     private String selectType(Request request, Map<String, Object> state,
@@ -298,23 +302,15 @@ public final class InternalSearchSpecResolver {
             String operation = request.requestId() + ":scan-type:" + type;
             Map<String, Object> scanState = new LinkedHashMap<>(state);
             scanState.put("candidateScanType", type);
-            var result = semantic.evaluate(new SemanticDecisionService.Request(
-                    Map.copyOf(scanState), Map.of("include", new NoulQuestion(
-                            "Must ontology type '" + type + "' be independently exhaustively SCANNED "
-                            + "to start this mission (not merely traversed to return its fields)?",
-                            "Independently selected complete starting root type",
-                            "Only an output, comparison field, or related type")),
-                    JEV_CONFIDENCE, Set.of(), new SemanticDecisionService.Escalation(
-                            request.missionId(), operation, operation,
-                            "Return true only if this type is an independently requested "
-                                    + "exhaustive starting root type. Do not confuse requested "
-                                    + "output types with starting root types.",
-                            Map.of("type", "object",
-                                    "properties", Map.of("include", Map.of("type", "boolean")),
-                                    "required", List.of("include"), "additionalProperties", false),
-                            80, 0.0d, Map.of("component", "internal-scan-membership"))));
-            if (result.probability("include") >= 0.5d)
-                selected.add(type);
+            var response = semantic.requireBounded(Map.copyOf(scanState), Map.of("include", new NoulQuestion(
+                    "Must ontology type '" + type + "' be independently exhaustively SCANNED "
+                    + "to start this mission (not merely traversed to return its fields)?",
+                    "Independently selected complete starting root type",
+                    "Only an output, comparison field, or related type")),
+                    jevMinimumConfidence, operation);
+            if (!(response.answers().get("include") instanceof NoulAnswer answer))
+                throw new IllegalStateException("JEV returned no bounded scan decision for " + type);
+            if (answer.probability() >= 0.5d) selected.add(type);
         }
         if (selected.size() < 2) throw new IllegalStateException(
                 "MULTI_TYPE_SCAN requires at least two independently authorized starting types");
