@@ -1,5 +1,7 @@
 package com.sparrowx.agentic.agents;
 
+import static com.sparrowx.agentic.components.MissionGoalReviewComponent.EVIDENCE_ACTION_COST;
+
 import com.embabel.agent.api.annotation.AchievesGoal;
 import com.embabel.agent.api.annotation.Condition;
 import com.embabel.agent.api.annotation.Cost;
@@ -24,14 +26,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * GOAP/HYBRID share the same evidence-driven Embabel state machine.
- * JEV selects a capability; a generative model produces only genuinely needed subqueries;
- * a state-scoped action executes
- * one authorized capability; the next state reevaluates the original goal.
+ * JEV evaluates bounded goal status and per-capability marginal value;
+ * Embabel selects among eligible scored evidence actions. A generative model
+ * produces distinct follow-up queries only when the original was attempted.
+ * The next state reevaluates the original mission goal.
  * Only the terminal state exposes @AchievesGoal. No query-specific Java workflow.
  */
 // UTILITY mode registers the Nirvana goal required by Hybrid's utility-style
@@ -103,7 +107,7 @@ public final class MissionAgent {
     }
 
     @Action(pre = "missionDocumentRecommended", canRerun = true, clearBlackboard = true,
-            readOnly = true, valueMethod = "documentEvidenceValue", cost = 0.05,
+            readOnly = true, valueMethod = "documentEvidenceValue", cost = EVIDENCE_ACTION_COST,
             description = "Retrieve authorized document evidence for the current subgoal")
     public ReasonState retrieveDocuments(ExecuteState state,
                                          @Provided MissionEvidenceActions capabilities,
@@ -114,7 +118,7 @@ public final class MissionAgent {
     }
 
     @Action(pre = "missionSearchRecommended", canRerun = true, clearBlackboard = true,
-            readOnly = true, valueMethod = "internalSearchValue", cost = 0.05,
+            readOnly = true, valueMethod = "internalSearchValue", cost = EVIDENCE_ACTION_COST,
             description = "Discover graph roots for the current subgoal")
     public ReasonState searchEntities(ExecuteState state,
                                       @Provided MissionEvidenceActions capabilities,
@@ -125,7 +129,7 @@ public final class MissionAgent {
     }
 
     @Action(pre = "missionGraphRecommended", canRerun = true, clearBlackboard = true,
-            readOnly = true, valueMethod = "companyGraphValue", cost = 0.05,
+            readOnly = true, valueMethod = "companyGraphValue", cost = EVIDENCE_ACTION_COST,
             description = "Query the tenant graph for the current subgoal")
     public ReasonState queryGraph(ExecuteState state,
                                   @Provided MissionEvidenceActions capabilities,
@@ -150,7 +154,7 @@ public final class MissionAgent {
         tracePublisher.observe(input, null, "decision", "Decisions & evidence",
                 "GOAL_REGISTERED", "Mission goal registered",
                 Map.of("goal", "FinishState.complete", "goalStatus", "ACTIVE",
-                       "plannerRequested", input.intent().plannerMode().name()), () -> null);
+                        "plannerRequested", input.intent().plannerMode().name()), () -> null);
         return new ReasonState(input, Progress.empty());
     }
 
@@ -168,52 +172,57 @@ public final class MissionAgent {
         public Stage reason(@Provided MissionGoalReviewComponent reviewer,
                             @Provided MissionTracePublisher tracePublisher) {
             try (var scope = MissionDecisionTraceContext.open(input, tracePublisher)) {
-            var loop = MissionDecisionTraceContext.begin("REASON_LOOP",
-                    "Review loop " + (progress.observations().size() + 1),
-                    Map.of("reviewIteration", Integer.toString(progress.observations().size() + 1),
-                            "goal", "FinishState.complete"));
-            try (var child = MissionDecisionTraceContext.parent(loop == null ? null : loop.id())) {
-            MissionDecisionTraceContext.snapshot("Mission evidence before review", progress.observations().size(),
-                    progress.evidence().size(), progress.evidence().stream().mapToInt(e -> e.evidenceRefs().size()).sum(),
-                    progress.attempts().values().stream().mapToInt(Integer::intValue).sum(), 0, 0);
-            Decision decision = reviewer.review(new MissionGoalReviewComponent.Request(
-                    input.missionId(),
-                    input.request().context().requestId() + ":goal-review:" + progress.observations().size(),
-                    input.request().query(),
-                    progress.observations().isEmpty() ? "START" :
-                            Objects.toString(progress.observations().getLast().get("action"), "START"),
-                    progress.observations(), progress.attempts(), input.intent().allowedTools(),
-                    input.intent().requiresRetrieval(), input.intent().requiresCompanyGraph(),
-                    input.intent().requiresDocumentEvidence(), input.intent().requiresInternalContext(),
-                    input.intent().requiresVerification(), input.intent().requiresHumanReview()));
-            MissionDecisionTraceContext.event("MISSION_ACTION_RECOMMENDATION", "Mission reviewer recommended action",
-                    Map.of("goalStatus", decision.status().name(), "nextAction", decision.nextAction(),
-                            "alternativeCount", Integer.toString(decision.alternatives().size()),
-                            "goal", "FinishState.complete"));
-            // These are outcome events for the actual terminal Embabel goal,
-            // distinct from its recommended next evidence capability.
-            MissionDecisionTraceContext.event("GOAL_EVALUATED", "Mission goal evaluated",
-                    Map.of("goal", "FinishState.complete", "goalStatus", decision.status().name(),
-                            "nextAction", decision.nextAction(),
-                            "missingCount", Integer.toString(decision.missingFacts().size()),
-                            "observationCount", Integer.toString(progress.observations().size()),
-                            "evidenceStateCount", Integer.toString(progress.evidence().size()),
-                            "attemptCount", Integer.toString(progress.attempts().values().stream()
-                                    .mapToInt(Integer::intValue).sum())));
-            if (loop != null) loop.finish("SUCCEEDED", "");
-            return decision.status() == Status.NEEDS_EVIDENCE
-                    ? new ExecuteState(input, progress, decision)
-                    : new FinishState(input, progress, decision);
-            } catch (RuntimeException | Error e) {
-                if (loop != null) loop.finish("FAILED", e.getClass().getSimpleName());
-                throw e;
-            }
+                var loop = MissionDecisionTraceContext.begin("REASON_LOOP",
+                        "Review loop " + (progress.observations().size() + 1),
+                        Map.of("reviewIteration", Integer.toString(progress.observations().size() + 1),
+                                "goal", "FinishState.complete"));
+                try (var child = MissionDecisionTraceContext.parent(loop == null ? null : loop.id())) {
+                    MissionDecisionTraceContext.snapshot("Mission evidence before review", progress.observations().size(),
+                            progress.evidence().size(), progress.evidence().stream().mapToInt(e -> e.evidenceRefs().size()).sum(),
+                            progress.attempts().values().stream().mapToInt(Integer::intValue).sum(), 0, 0);
+                    Decision decision = reviewer.review(new MissionGoalReviewComponent.Request(
+                            input.missionId(),
+                            input.request().context().requestId() + ":goal-review:" + progress.observations().size(),
+                            input.request().query(),
+                            progress.observations().isEmpty() ? "START" :
+                                    Objects.toString(progress.observations().getLast().get("action"), "START"),
+                            progress.observations(), progress.attempts(), input.intent().allowedTools(),
+                            input.intent().requiresRetrieval(), input.intent().requiresCompanyGraph(),
+                            input.intent().requiresDocumentEvidence(), input.intent().requiresInternalContext(),
+                            input.intent().requiresVerification(), input.intent().requiresHumanReview()));
+                    MissionDecisionTraceContext.event("MISSION_ACTION_RECOMMENDATION", "Mission reviewer prepared candidates",
+                            Map.of("goalStatus", decision.status().name(),
+                                    "nextAction", decision.nextAction(), // highest-ranked preview, not the selected action
+                                    "candidateCount", Integer.toString(decision.alternatives().isEmpty()
+                                            && decision.status() == Status.NEEDS_EVIDENCE ? 1
+                                            : decision.alternatives().size()),
+                                    "alternativeCount", Integer.toString(Math.max(0, decision.alternatives().size() - 1)),
+                                    "selectionAuthority", "EMBABEL",
+                                    "goal", "FinishState.complete"));
+                    // These are outcome events for the actual terminal Embabel goal,
+                    // distinct from its recommended next evidence capability.
+                    MissionDecisionTraceContext.event("GOAL_EVALUATED", "Mission goal evaluated",
+                            Map.of("goal", "FinishState.complete", "goalStatus", decision.status().name(),
+                                    "nextAction", decision.nextAction(),
+                                    "missingCount", Integer.toString(decision.missingFacts().size()),
+                                    "observationCount", Integer.toString(progress.observations().size()),
+                                    "evidenceStateCount", Integer.toString(progress.evidence().size()),
+                                    "attemptCount", Integer.toString(progress.attempts().values().stream()
+                                            .mapToInt(Integer::intValue).sum())));
+                    if (loop != null) loop.finish("SUCCEEDED", "");
+                    return decision.status() == Status.NEEDS_EVIDENCE
+                            ? new ExecuteState(input, progress, decision)
+                            : new FinishState(input, progress, decision);
+                } catch (RuntimeException | Error e) {
+                    if (loop != null) loop.finish("FAILED", e.getClass().getSimpleName());
+                    throw e;
+                }
             }
 
         }
     }
 
-    /** One authorized capability per reviewer proposal; methods are called by the annotated wrappers above. */
+    /** Embabel selects one of the reviewer's scored, authorized candidates. */
     public record ExecuteState(MissionRunInput input, Progress progress, Decision decision)
             implements Stage {
         public ExecuteState {
@@ -263,14 +272,19 @@ public final class MissionAgent {
         }
 
         private void ensureAuthorized(String capability) {
-            if (!input.intent().allowedTools().isEmpty()
-                    && !input.intent().allowedTools().contains(capability))
+            if (!MissionCapabilities.allows(input.intent(), capability))
                 throw new SecurityException("Tool is not permitted by the mission: " + capability);
         }
 
         private ReasonState run(String action, MissionTracePublisher tracePublisher,
-                java.util.function.Supplier<MissionEvidenceActions.EvidenceState> operation) {
+                                java.util.function.Supplier<MissionEvidenceActions.EvidenceState> operation) {
             try (var scope = MissionDecisionTraceContext.open(input, tracePublisher)) {
+                var proposal = decision.proposalFor(action).orElseThrow();
+                MissionDecisionTraceContext.event("MISSION_ACTION_SELECTED", "Embabel selected eligible capability",
+                        Map.of("capability", action,
+                                "utility", Double.toString(proposal.utility()),
+                                "cost", Double.toString(EVIDENCE_ACTION_COST),
+                                "netUtility", Double.toString(proposal.netUtility())));
                 var actionSpan = MissionDecisionTraceContext.begin("CAPABILITY_ATTEMPT",
                         "Execute " + action, Map.of("capability", action,
                                 "attempt", Integer.toString(progress.attempts().getOrDefault(action, 0) + 1)));
@@ -294,10 +308,14 @@ public final class MissionAgent {
                                     "addedEvidence", Integer.toString(updated.evidence().size() - beforeEvidence)));
                     if (actionSpan != null) actionSpan.finish("SUCCEEDED", "");
                     return new ReasonState(input, updated);
-                } catch (SecurityException e) {
-                    if (actionSpan != null) actionSpan.finish("FAILED", "SecurityException");
+                } catch (SecurityException | CancellationException e) {
+                    if (actionSpan != null) actionSpan.finish("FAILED", e.getClass().getSimpleName());
                     throw e;
                 } catch (RuntimeException e) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        if (actionSpan != null) actionSpan.finish("FAILED", "Interrupted");
+                        throw e;
+                    }
                     // The agent deliberately records a failed tool call as evidence and
                     // continues planning. Log the *actual* exception first: Embabel
                     // otherwise reports this wrapper action as successful, masking the
@@ -352,7 +370,7 @@ public final class MissionAgent {
                     // mission. Do not discard independently verified evidence.
                     // Grounded synthesis must clearly label it uncertified.
                     boolean partialReportAvailable = decision.status() == Status.BLOCKED
-                            && progress.evidence().stream().anyMatch(e -> !e.evidenceRefs().isEmpty());
+                            && MissionEvidenceGrounding.hasEvidence(input.intent(), progress.evidence());
                     if (answerReady || partialReportAvailable) {
                         result = capabilities.complete(input, context, progress.evidence(),
                                 decision.status() == Status.SATISFIED);
@@ -363,20 +381,30 @@ public final class MissionAgent {
                         result = new MissionResult(input.missionId(), "Mission not satisfied", message,
                                 List.of(), List.of(), List.of(), List.of(), List.of(), List.of(),
                                 Map.of("grounded", false), Map.of("goalReviewStatus", decision.status().name(),
-                                        "missingFacts", decision.missingFacts(), "goalReviewReason", decision.reason()));
+                                "missingFacts", decision.missingFacts(), "goalReviewReason", decision.reason(),
+                                "goalCertified", false));
                     }
                     if (synthesis != null) synthesis.finish("SUCCEEDED", "");
+                    // Evidence admission may reject a reviewer's satisfaction
+                    // claim. Trace the final result rather than the earlier vote.
+                    Status finalStatus = Boolean.TRUE.equals(result.debugSummary().get("goalCertified"))
+                            ? Status.SATISFIED
+                            : decision.status() == Status.SATISFIED
+                            ? (result.evidenceRefs().isEmpty() ? Status.BLOCKED : Status.READY_FOR_SYNTHESIS)
+                            : decision.status();
                     MissionDecisionTraceContext.event(
-                            decision.status() == Status.SATISFIED ? "GOAL_SATISFIED"
-                                    : decision.status() == Status.READY_FOR_SYNTHESIS
-                                            ? "GOAL_EVIDENCE_READY" : "GOAL_BLOCKED",
-                            decision.status() == Status.SATISFIED ? "Mission goal satisfied"
-                                    : decision.status() == Status.READY_FOR_SYNTHESIS
-                                            ? "Grounded answer generated without JEV satisfaction certification"
-                                            : "Mission goal unresolved",
-                            Map.of("goal", "FinishState.complete", "goalStatus", decision.status().name()));
+                            finalStatus == Status.SATISFIED ? "GOAL_SATISFIED"
+                                    : finalStatus == Status.READY_FOR_SYNTHESIS
+                                    ? "GOAL_EVIDENCE_READY" : "GOAL_BLOCKED",
+                            finalStatus == Status.SATISFIED ? "Mission goal satisfied"
+                                    : finalStatus == Status.READY_FOR_SYNTHESIS
+                                    ? "Grounded answer generated without goal certification"
+                                    : "Mission goal unresolved",
+                            Map.of("goal", "FinishState.complete", "goalStatus", finalStatus.name(),
+                                    "reviewStatus", decision.status().name()));
                     MissionDecisionTraceContext.event("MISSION_FINISH", "Mission process finished",
-                            Map.of("goal", "FinishState.complete", "goalStatus", decision.status().name()));
+                            Map.of("goal", "FinishState.complete", "goalStatus", finalStatus.name(),
+                                    "reviewStatus", decision.status().name()));
                     return result;
                 } catch (RuntimeException | Error error) {
                     if (synthesis != null) synthesis.finish("FAILED", error.getClass().getSimpleName());
@@ -399,8 +427,8 @@ public final class MissionAgent {
 
         public MissionEvidenceActions.InternalSearchState latestRoots() {
             for (int i = evidence.size() - 1; i >= 0; --i)
-                if (evidence.get(i) instanceof MissionEvidenceActions.InternalSearchState root
-                        && root.selection().ready()) return root;
+                if (evidence.get(i) instanceof MissionEvidenceActions.InternalSearchState root)
+                    return root.performed() && root.selection().ready() ? root : null;
             return null;
         }
 

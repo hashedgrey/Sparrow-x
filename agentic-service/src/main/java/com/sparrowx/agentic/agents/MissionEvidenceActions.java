@@ -1,10 +1,12 @@
 package com.sparrowx.agentic.agents;
 
 import com.embabel.agent.api.common.OperationContext;
+import io.grpc.Deadline;
+import java.util.concurrent.TimeUnit;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.sparrowx.agentic.actions.synthesis.BuildCitationsAction;
 import com.sparrowx.agentic.agents.MissionRunInput;
 import com.sparrowx.agentic.components.InternalSearchSpecResolver;
-import com.sparrowx.agentic.components.SystemOneUtilityComponent.UtilityAssessment;
 import com.sparrowx.agentic.components.SynthesisComponent;
 import com.sparrowx.agentic.components.SynthesisComponent.SynthesisDraft;
 import com.sparrowx.agentic.components.SynthesisComponent.SynthesisRequest;
@@ -38,7 +40,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -124,8 +125,8 @@ public final class MissionEvidenceActions {
      */
 
     /**
-     * Keeps HYBRID in its utility-selection loop while evidence-producing
-     * actions remain useful. The real terminal goal is MissionResult.
+     * Returns evidence and observations. Action values are computed by the
+     * goal reviewer and supplied to Embabel before the action is executed.
      */
 
     public DocumentEvidenceState buildDocumentEvidence(MissionRunInput input, OperationContext context) {
@@ -234,26 +235,13 @@ public final class MissionEvidenceActions {
                             intent.requiresVerification()
                     );
 
-            UtilityAssessment utility =
-                    reassess(
-                            input,
-                            context,
-                            DOCUMENT_BUILD,
-                            summary,
-                            attributes,
-                            result.evidenceRefs(),
-                            "",
-                            ""
-                    );
-
             return new DocumentEvidenceState(
                     true,
                     null,
                     List.of(),
                     result.warnings(),
                     summary,
-                    attributes,
-                    utility
+                    attributes
             );
         }
 
@@ -288,26 +276,13 @@ public final class MissionEvidenceActions {
                         intent.requiresVerification()
                 );
 
-        UtilityAssessment utility =
-                reassess(
-                        input,
-                        context,
-                        DOCUMENT_BUILD,
-                        summary,
-                        attributes,
-                        result.evidenceRefs(),
-                        "",
-                        ""
-                );
-
         return new DocumentEvidenceState(
                 true,
                 result.graph(),
                 result.evidenceRefs(),
                 result.warnings(),
                 summary,
-                attributes,
-                utility
+                attributes
         );
     }
 
@@ -429,6 +404,7 @@ public final class MissionEvidenceActions {
         Plan verifiedPlan = new Plan(plan.mode(), verifiedQueries, plan.perRootGraphQuestion());
         Selection selection = new Selection(verifiedPlan, rootResults);
         Map<String, Object> attributes = new LinkedHashMap<>(extraction.debug());
+        attributes.put("question", question);
         attributes.put("rootSelectionMode", verifiedPlan.mode().name());
         attributes.put("rootQueryCount", verifiedPlan.queries().size());
         attributes.put("selectedRootCount", selection.selected().size());
@@ -443,17 +419,9 @@ public final class MissionEvidenceActions {
                 ? "Resolved " + selection.selected().size() + " root entities using " + plan.mode()
                 : "Incomplete root resolution: " + selection.explanation();
 
-        // Reassessment ranks actions; it does not override typed root correctness.
-        Candidate unique = plan.mode() == Mode.UNIQUE && selection.selected().size() == 1
-                ? selection.selected().getFirst() : null;
-        UtilityAssessment utility = reassess(
-                input, context, INTERNAL_SEARCH, summary, debug, evidenceRefs,
-                unique == null ? "" : unique.entityId(),
-                unique == null ? "" : unique.nodeType()
-        );
         return new InternalSearchState(
                 true, evidenceRefs, warnings.stream().distinct().toList(),
-                summary, debug, selection, utility
+                summary, debug, selection
         );
     }
 
@@ -545,7 +513,7 @@ public final class MissionEvidenceActions {
         }
         List<Candidate> distinct = matches.stream()
                 .collect(java.util.stream.Collectors.toMap(Candidate::identity, c -> c, (a, b) -> a,
-                        java.util.LinkedHashMap::new)).values().stream().toList();
+                        LinkedHashMap::new)).values().stream().toList();
         if (distinct.isEmpty()) return new RootResult(original, List.of(), Outcome.EMPTY,
                 "No verified ontology identity matched the named qualifier");
         if (distinct.size() != 1) return new RootResult(original, List.of(), Outcome.AMBIGUOUS,
@@ -603,23 +571,20 @@ public final class MissionEvidenceActions {
         Selection selection = searchState.selection();
         if (!selection.ready()) {
             return CompanyGraphState.skipped(
-                    "Unresolved root set: " + selection.explanation(),
-                    searchState.utility());
+                    "Unresolved root set: " + selection.explanation());
         }
 
         List<Candidate> candidates = selection.selected();
         if (candidates.isEmpty()) {
             return CompanyGraphState.skipped(
-                    "Exhaustive search returned no matching roots",
-                    searchState.utility());
+                    "Exhaustive search returned no matching roots");
         }
         if (candidates.size() > maxGraphRoots) {
             return CompanyGraphState.skipped(
-                    "Graph root count exceeds configured limit",
-                    searchState.utility());
+                    "Graph root count exceeds configured limit");
         }
 
-        long deadline = System.nanoTime() + maxGraphBatchMillis * 1_000_000L;
+        Deadline deadline = Deadline.after(maxGraphBatchMillis, TimeUnit.MILLISECONDS);
         GoalDirectedCompanyGraphStep.Prepared prepared = traceCall(input, "internal", "Company graph", "GRAPH_COMPILE", "Compile graph goal",
                 Map.of("rootCount", Integer.toString(candidates.size())),
                 () -> graphTraversalStep.prepare(input.request().context(),
@@ -640,7 +605,7 @@ public final class MissionEvidenceActions {
 
         int batch = 0;
         for (var group : groups.entrySet()) {
-            if (System.nanoTime() >= deadline) {
+            if (deadline.isExpired()) {
                 overall = GraphResolutionStatus.INSUFFICIENT;
                 warnings.add("Graph batch exceeded its global time budget");
                 break;
@@ -649,10 +614,10 @@ public final class MissionEvidenceActions {
             String batchEffectId = effectId(input, "company-graph:" + queryFingerprint(question + selection.selected().toString())) + ":batch:" + batch++;
             var result = traceCall(input, "internal", "Company graph", "INTSVC_GRAPH", "Execute graph batch",
                     Map.of("service", "internal-service", "rootType", group.getKey(), "rootCount", Integer.toString(group.getValue().size())),
-                    () -> graphTraversalStep.executeBatch(input.request().context(), batchEffectId, prepared, group.getKey()));
+                    () -> graphTraversalStep.executeBatch(input.request().context(), batchEffectId, prepared, group.getKey(), deadline));
             warnings.addAll(result.warnings());
 
-            boolean timedOut = System.nanoTime() >= deadline;
+            boolean timedOut = deadline.isExpired();
             if (timedOut || result.status() != GraphResolutionStatus.COMPLETE) {
                 overall = timedOut ? GraphResolutionStatus.INSUFFICIENT : result.status();
                 warnings.add(timedOut
@@ -668,7 +633,6 @@ public final class MissionEvidenceActions {
                 break;
             }
 
-            allRefs.addAll(result.evidenceRefs());
             for (Candidate candidate : group.getValue()) {
                 List<?> forRoot = verified.stream()
                         .filter(Map.class::isInstance)
@@ -684,23 +648,49 @@ public final class MissionEvidenceActions {
                             "verifiedAnswer", row
                     ));
                 }
-                outcomes.add(new RootGraphOutcome(
-                        candidate, GraphResolutionStatus.COMPLETE, result.evidenceRefs(),
-                        result.summary(), result.attributes()));
+                List<EvidenceRef> rootRefs = result.evidenceRefs().stream()
+                        .filter(ref -> MissionEvidenceGrounding.graphRefMatches(ref, candidate))
+                        .toList();
+                GraphResolutionStatus rootStatus = rootRefs.isEmpty()
+                        ? GraphResolutionStatus.INSUFFICIENT : GraphResolutionStatus.COMPLETE;
+                if (rootRefs.isEmpty()) {
+                    overall = GraphResolutionStatus.INSUFFICIENT;
+                    warnings.add("Missing validated query proof for root " + candidate.identity());
+                }
+                Map<String, Object> rootAttributes = new LinkedHashMap<>();
+                rootAttributes.put("rootEntityId", candidate.entityId());
+                rootAttributes.put("rootNodeType", candidate.nodeType());
+                rootAttributes.put("validatedGraphAnswerRows", forRoot);
+                rootAttributes.put("emptyQueryResult", forRoot.isEmpty());
+                outcomes.add(new RootGraphOutcome(candidate, rootStatus, rootRefs,
+                        rootRefs.isEmpty() ? "Root proof unavailable"
+                                : forRoot.isEmpty() ? "No rows in the verified batch query result"
+                                : "Verified root query rows", Map.copyOf(rootAttributes)));
+                allRefs.addAll(rootRefs);
             }
         }
 
-        if (outcomes.size() != candidates.size() && overall == GraphResolutionStatus.COMPLETE) {
+        long processedRoots = outcomes.stream()
+                .filter(outcome -> outcome.status() == GraphResolutionStatus.COMPLETE).count();
+        if (processedRoots != candidates.size() && overall == GraphResolutionStatus.COMPLETE) {
             overall = GraphResolutionStatus.INSUFFICIENT;
             warnings.add("Not all required roots were processed");
         }
 
+        Set<String> recordedRoots = outcomes.stream().map(outcome -> outcome.root().identity())
+                .collect(java.util.stream.Collectors.toSet());
+        for (Candidate candidate : candidates) {
+            if (!recordedRoots.contains(candidate.identity()))
+                outcomes.add(new RootGraphOutcome(candidate, overall, List.of(),
+                        "Root did not produce a complete query proof", Map.of("notProcessed", true)));
+        }
         Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("question", question);
         attributes.put("graphResolutionStatus", overall.name());
         attributes.put("rootSelectionMode", selection.plan().mode().name());
         attributes.put("requestedRoots", candidates.size());
         attributes.put("compiledGraphGoals", prepared.compiledGoals().size());
-        attributes.put("processedRoots", outcomes.size());
+        attributes.put("processedRoots", processedRoots);
         attributes.put("validatedGraphAnswerRows", List.copyOf(verifiedRows));
 
         String summary = overall == GraphResolutionStatus.COMPLETE
@@ -710,17 +700,10 @@ public final class MissionEvidenceActions {
         // Each returned ref is independently validated by IntSvc. A later
         // failed batch must not erase proof from earlier successful batches.
         List<EvidenceRef> evidenceRefs = allRefs.stream().distinct().toList();
-        Map<String, Object> debug = Map.copyOf(attributes);
-        UtilityAssessment utility = overall == GraphResolutionStatus.COMPLETE
-                ? reassess(input, context, COMPANY_GRAPH, summary, debug,
-                evidenceRefs, "", "")
-                : searchState.utility();
-
         return new CompanyGraphState(
                 true, overall, evidenceRefs, warnings.stream().distinct().toList(),
-                summary, debug,
-                List.copyOf(outcomes),
-                utility
+                summary, Map.copyOf(attributes),
+                List.copyOf(outcomes)
         );
     }
 
@@ -739,7 +722,7 @@ public final class MissionEvidenceActions {
             OperationContext context,
             List<EvidenceState> evidenceStates
     ) {
-        return complete(input, context, evidenceStates, true);
+        return complete(input, context, evidenceStates, false);
     }
 
     /** goalCertified=false permits a qualified evidence report, not a success claim. */
@@ -761,9 +744,12 @@ public final class MissionEvidenceActions {
 
 
 
+        evidenceStates = MissionEvidenceGrounding.select(input.intent(),
+                Objects.requireNonNull(evidenceStates, "evidenceStates"));
+
         // Exhaustive ALL_MATCHES with zero roots is a grounded negative result,
         // not an ambiguous search and not permission for model-memory synthesis.
-        MissionResult emptyRoots = exhaustiveEmptyRootsResult(input, evidenceStates);
+        MissionResult emptyRoots = exhaustiveEmptyRootsResult(input, evidenceStates, goalCertified);
         if (emptyRoots != null) return emptyRoots;
 
         /*
@@ -779,17 +765,13 @@ public final class MissionEvidenceActions {
         // Verified evidence from one source remains reportable when another
         // source is unavailable. A partial report is never goal-certified.
         boolean hasVerifiedEvidence = evidenceStates.stream()
-                .anyMatch(state -> !state.evidenceRefs().isEmpty());
+                .filter(EvidenceState::performed).anyMatch(state -> !state.evidenceRefs().isEmpty());
         if (insufficient != null && (goalCertified || !hasVerifiedEvidence)) {
             return insufficient;
         }
         List<String> unresolvedRequirements = missingRequiredEvidence(input, evidenceStates);
 
-        List<EvidenceState> groundingStates =
-                selectGroundingStates(
-                        input.intent(),
-                        evidenceStates
-                );
+        List<EvidenceState> groundingStates = evidenceStates;
 
         List<EvidenceRef> rawEvidence =
                 groundingStates.stream()
@@ -819,18 +801,19 @@ public final class MissionEvidenceActions {
             /*
              * BuildCitationsAction remains a deterministic formatter. It does
              * not decide semantic relevance. MissionEvidenceActions selects the
-             * authoritative grounding set first, then BuildSpec bounds the
-             * candidate set and assigns stable citation labels.
+             * admitted grounding set first. Retain every admitted source here:
+             * a fixed citation cutoff can erase a mandatory root or document.
+             * The formatter deduplicates and assigns stable citation labels.
              */
             BuildCitationsAction.Result normalized =
                     citationsAction.execute(
                             new BuildCitationsAction.BuildSpec(
-                                    selectedEvidence, excerptsByEvidenceId(selectedEvidence), 8)
+                                    selectedEvidence, excerptsByEvidenceId(selectedEvidence),
+                                    Math.max(1, selectedEvidence.size()))
                     );
 
             evidenceRefs = normalized.evidenceRefs();
-            citations =
-                    input.intent().requiresCitations() ? normalized.citations() : List.of();
+            citations = input.intent().requiresCitations() ? normalized.citations() : List.of();
         }
 
         List<String> warnings =
@@ -943,17 +926,16 @@ public final class MissionEvidenceActions {
 
         Map<String, Object> attributes();
 
-        UtilityAssessment utility();
     }
 
+    @JsonIgnoreProperties("utility") // Accept pre-migration checkpoints containing the removed field.
     public record DocumentEvidenceState(
             boolean performed,
             DocumentEvidenceGraphProto graph,
             List<EvidenceRef> evidenceRefs,
             List<String> warnings,
             String summary,
-            Map<String, Object> attributes,
-            UtilityAssessment utility
+            Map<String, Object> attributes
     ) implements EvidenceState {
 
         public DocumentEvidenceState {
@@ -967,18 +949,17 @@ public final class MissionEvidenceActions {
             warnings = warnings == null ? List.of() : List.copyOf(warnings);
             summary = summary == null ? "" : summary;
             attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
-            utility = Objects.requireNonNull(utility, "utility must not be null");
         }
     }
 
+    @JsonIgnoreProperties("utility") // Accept pre-migration checkpoints containing the removed field.
     public record InternalSearchState(
             boolean performed,
             List<EvidenceRef> evidenceRefs,
             List<String> warnings,
             String summary,
             Map<String, Object> attributes,
-            Selection selection,
-            UtilityAssessment utility
+            Selection selection
     ) implements EvidenceState {
         public InternalSearchState {
             evidenceRefs = List.copyOf(Objects.requireNonNull(evidenceRefs, "evidenceRefs"));
@@ -986,7 +967,6 @@ public final class MissionEvidenceActions {
             summary = Objects.requireNonNull(summary, "summary");
             attributes = Map.copyOf(Objects.requireNonNull(attributes, "attributes"));
             selection = Objects.requireNonNull(selection, "selection");
-            utility = Objects.requireNonNull(utility, "utility");
         }
 
         public List<Candidate> candidateRoots() {
@@ -1010,6 +990,7 @@ public final class MissionEvidenceActions {
         }
     }
 
+    @JsonIgnoreProperties("utility") // Accept pre-migration checkpoints containing the removed field.
     public record CompanyGraphState(
             boolean performed,
             GraphResolutionStatus resolutionStatus,
@@ -1017,41 +998,19 @@ public final class MissionEvidenceActions {
             List<String> warnings,
             String summary,
             Map<String, Object> attributes,
-            List<RootGraphOutcome> rootOutcomes,
-            UtilityAssessment utility
+            List<RootGraphOutcome> rootOutcomes
     ) implements EvidenceState {
 
         public CompanyGraphState {
-            resolutionStatus = Objects.requireNonNull(
-                    resolutionStatus,
-                    "resolutionStatus must not be null"
-            );
-
-            evidenceRefs = evidenceRefs == null
-                    ? List.of()
-                    : List.copyOf(evidenceRefs);
-
-            warnings = warnings == null
-                    ? List.of()
-                    : List.copyOf(warnings);
-
+            resolutionStatus = Objects.requireNonNull(resolutionStatus, "resolutionStatus must not be null");
+            evidenceRefs = evidenceRefs == null ? List.of() : List.copyOf(evidenceRefs);
+            warnings = warnings == null ? List.of() : List.copyOf(warnings);
             summary = summary == null ? "" : summary;
-
-            attributes = attributes == null
-                    ? Map.of()
-                    : Map.copyOf(attributes);
-
+            attributes = attributes == null ? Map.of() : Map.copyOf(attributes);
             rootOutcomes = List.copyOf(Objects.requireNonNull(rootOutcomes, "rootOutcomes"));
-            utility = Objects.requireNonNull(
-                    utility,
-                    "utility must not be null"
-            );
         }
 
-        public static CompanyGraphState skipped(
-                String summary,
-                UtilityAssessment utility
-        ) {
+        public static CompanyGraphState skipped(String summary) {
             return new CompanyGraphState(
                     false,
                     GraphResolutionStatus.INSUFFICIENT,
@@ -1063,22 +1022,9 @@ public final class MissionEvidenceActions {
                             "graphResolutionStatus",
                             GraphResolutionStatus.INSUFFICIENT.name()
                     ),
-                    List.of(),
-                    utility
+                    List.of()
             );
         }
-    }
-
-    /**
-     * Compatibility only: legacy evidence DTOs still carry a utility field.
-     * Ranking has moved to Embabel planner selection and LLM goal review.
-     * This method performs no model invocation or heuristic action selection.
-     */
-    private static UtilityAssessment reassess(MissionRunInput input, OperationContext context,
-                                              String latestAction, String latestSummary, Map<String, Object> latestAttributes,
-                                              List<EvidenceRef> latestEvidenceRefs, String resolvedEntityId, String resolvedEntityType) {
-        return new UtilityAssessment(0, 0, 0, 0, 0,
-                "not-ranked", "not-ranked", effectId(input, "observation:" + latestAction));
     }
 
     /*
@@ -1094,13 +1040,14 @@ public final class MissionEvidenceActions {
      * The synthesis LLM is not permitted to fill this gap from model memory.
      */
     private static MissionResult exhaustiveEmptyRootsResult(
-            MissionRunInput input, List<EvidenceState> evidenceStates
+            MissionRunInput input, List<EvidenceState> evidenceStates, boolean goalCertified
     ) {
-        InternalSearchState search = evidenceStates.stream()
-                .filter(InternalSearchState.class::isInstance)
-                .map(InternalSearchState.class::cast)
-                .findFirst().orElse(null);
+        InternalSearchState search = latestState(evidenceStates, InternalSearchState.class);
         if (input.intent().requiresDocumentEvidence() || search == null
+                || !search.performed()
+                || !Boolean.TRUE.equals(search.attributes().get("rootScopeExhaustive"))
+                || !input.request().query().strip().equalsIgnoreCase(
+                        Objects.toString(search.attributes().get("question"), "").strip())
                 || (search.selection().plan().mode() != Mode.ALL_MATCHES
                 && search.selection().plan().mode() != Mode.TYPE_SCAN
                 && search.selection().plan().mode() != Mode.MULTI_TYPE_SCAN)
@@ -1114,52 +1061,34 @@ public final class MissionEvidenceActions {
                 "No internal entities matched the requested criteria in the selected tenant.",
                 List.of(), List.of(), List.of(), List.of(), List.of(),
                 List.of(), Map.of("grounded", true, "result", "EXHAUSTIVE_EMPTY_ROOT_SET"),
-                Map.of("rootSelectionMode", search.selection().plan().mode().name(), "rootCount", 0)
+                Map.of("rootSelectionMode", search.selection().plan().mode().name(), "rootCount", 0,
+                        "goalCertified", goalCertified)
         );
     }
 
     private static List<String> missingRequiredEvidence(
             MissionRunInput input, List<EvidenceState> evidenceStates) {
         MissionIntent intent = input.intent();
-        DocumentEvidenceState documentState =
-                evidenceStates.stream()
-                        .filter(DocumentEvidenceState.class::isInstance)
-                        .map(DocumentEvidenceState.class::cast)
-                        .findFirst()
-                        .orElse(null);
-
-        InternalSearchState internalState =
-                evidenceStates.stream()
-                        .filter(InternalSearchState.class::isInstance)
-                        .map(InternalSearchState.class::cast)
-                        .findFirst()
-                        .orElse(null);
-
-        CompanyGraphState companyGraphState =
-                evidenceStates.stream()
-                        .filter(CompanyGraphState.class::isInstance)
-                        .map(CompanyGraphState.class::cast)
-                        .findFirst()
-                        .orElse(null);
+        boolean hasDocumentEvidence = evidenceStates.stream()
+                .filter(DocumentEvidenceState.class::isInstance)
+                .anyMatch(state -> state.performed() && !state.evidenceRefs().isEmpty());
+        InternalSearchState internalState = latestState(evidenceStates, InternalSearchState.class);
+        CompanyGraphState companyGraphState = latestState(evidenceStates, CompanyGraphState.class);
 
         List<String> missing = new ArrayList<>();
 
-        if (intent.requiresDocumentEvidence()
-                && (documentState == null
-                || documentState
-                .evidenceRefs()
-                .isEmpty())) {
-
-            missing.add(
-                    "document evidence"
-            );
+        if (intent.requiresDocumentEvidence() && !hasDocumentEvidence) {
+            missing.add("document evidence");
         }
 
         if (intent.requiresInternalContext()
                 && (internalState == null
+                || !internalState.performed()
                 || !internalState.selection().ready()
-                || (internalState.evidenceRefs().isEmpty()
-                && !internalState.selection().selected().isEmpty()))) {
+                || !Boolean.TRUE.equals(internalState.attributes().get("rootScopeExhaustive"))
+                || internalState.selection().selected().stream().anyMatch(root ->
+                        internalState.evidenceRefs().stream().noneMatch(ref ->
+                                MissionEvidenceGrounding.entityRefMatches(ref, root))))) {
             missing.add(internalState == null ? "internal context" :
                     "internal root selection: " + internalState.selection().explanation());
         }
@@ -1173,7 +1102,7 @@ public final class MissionEvidenceActions {
             }
         }
 
-        if (companyGraphState != null) {
+        if (intent.requiresCompanyGraph() && companyGraphState != null) {
             if (companyGraphState.resolutionStatus() != GraphResolutionStatus.COMPLETE) {
                 missing.add(
                         "company graph requirements ["
@@ -1182,8 +1111,16 @@ public final class MissionEvidenceActions {
                                 + companyGraphState.summary()
                 );
 
-            } else if (companyGraphState.evidenceRefs().isEmpty()) {
+            } else if (!companyGraphState.performed() || companyGraphState.evidenceRefs().isEmpty()) {
                 missing.add("company graph evidence");
+            } else if (internalState != null && internalState.selection().ready()) {
+                Set<String> requiredRoots = internalState.selection().selected().stream()
+                        .map(Candidate::identity).collect(java.util.stream.Collectors.toSet());
+                Set<String> provenRoots = companyGraphState.rootOutcomes().stream()
+                        .filter(root -> root.status() == GraphResolutionStatus.COMPLETE
+                                && !root.evidenceRefs().isEmpty())
+                        .map(root -> root.root().identity()).collect(java.util.stream.Collectors.toSet());
+                if (!provenRoots.equals(requiredRoots)) missing.add("graph proof for the current root scope");
             }
         }
 
@@ -1237,6 +1174,8 @@ public final class MissionEvidenceActions {
                         "embabelPlanner",
                         intent.plannerMode()
                                 .name(),
+
+                        "goalCertified", false,
 
                         "warnings",
                         warnings
@@ -1304,23 +1243,6 @@ public final class MissionEvidenceActions {
                 .getSimpleName();
     }
 
-    private static String retrievalHint(
-            MissionRunInput input,
-            MissionIntent intent
-    ) {
-        String query =
-                input.request()
-                        .query();
-
-        if (query != null
-                && !query.isBlank()) {
-
-            return query;
-        }
-
-        return intent.objective();
-    }
-
     private static DocumentScope documentScope(
             MissionRunInput input,
             MissionIntent intent
@@ -1351,14 +1273,10 @@ public final class MissionEvidenceActions {
         );
     }
 
-    /**
-     * Source selection was historically tied to frozen intent flags and could
-     * silently discard evidence requested later by the model. Preserve all
-     * authorized observations; semantic relevance is decided during review.
-     */
-    private static List<EvidenceState> selectGroundingStates(
-            MissionIntent intent, List<EvidenceState> evidenceStates) {
-        return evidenceStates == null ? List.of() : List.copyOf(evidenceStates);
+    private static <T extends EvidenceState> T latestState(List<EvidenceState> states, Class<T> type) {
+        for (int i = states.size() - 1; i >= 0; --i)
+            if (type.isInstance(states.get(i))) return type.cast(states.get(i));
+        return null;
     }
 
     private static List<EvidenceRef> selectGroundingEvidence(
@@ -1367,7 +1285,7 @@ public final class MissionEvidenceActions {
         if (rawEvidence != null) {
             for (EvidenceRef ref : rawEvidence) {
                 if (ref != null && ref.evidenceId() != null && !ref.evidenceId().isBlank())
-                    unique.putIfAbsent(ref.evidenceId(), ref);
+                    unique.put(ref.evidenceId(), ref); // Prefer the latest validated observation of this identity.
             }
         }
         return List.copyOf(unique.values());
@@ -1415,15 +1333,7 @@ public final class MissionEvidenceActions {
             MissionRunInput input,
             String capability
     ) {
-        Set<String> allowed =
-                input.intent()
-                        .allowedTools();
-
-        return allowed == null
-                || allowed.isEmpty()
-                || allowed.contains(
-                capability
-        );
+        return MissionCapabilities.allows(input.intent(), capability);
     }
 
     private static String queryFingerprint(String query) {
@@ -1440,26 +1350,6 @@ public final class MissionEvidenceActions {
                 .requestId()
                 + ":embabel:"
                 + action;
-    }
-
-    private static double clamp(
-            double value
-    ) {
-        return Math.max(
-                0.0,
-                Math.min(
-                        1.0,
-                        value
-                )
-        );
-    }
-
-    private static String nullToEmpty(
-            String value
-    ) {
-        return value == null
-                ? ""
-                : value;
     }
 
     private record DocumentScope(
