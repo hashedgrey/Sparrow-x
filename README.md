@@ -85,7 +85,7 @@ flowchart TD
     D --> E[Embabel: Select action using GOAP/HYBRID]
     E --> F{Original query already attempted?}
     F -->|No| G[Execute original query]
-    F -->|Yes| H[LLM: Generate distinct follow-up subquery]
+    F -->|Yes| H[System 2: LLM: Generate distinct follow-up subquery]
     H --> I[Execute authorized capability]
     G --> J[Update evidence and blackboard]
     I --> J
