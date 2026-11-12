@@ -32,6 +32,12 @@ public class DiceIngestionProperties {
     @Min(1)
     private int propositionPersistenceThreads = 3;
 
+    // Opt-in: same DICE repository, but DeepInfra requests are precomputed in batches.
+    private boolean propositionBatchEmbeddingEnabled = false;
+
+    @Min(1)
+    private int propositionEmbeddingBatchSize = 16;
+
     // Cache only exact duplicate resolver requests during one ingestion.
     private boolean entityResolutionCacheEnabled = true;
 
@@ -70,6 +76,14 @@ public class DiceIngestionProperties {
 
     public int propositionPersistenceThreads() {
         return propositionPersistenceThreads;
+    }
+
+    public boolean propositionBatchEmbeddingEnabled() {
+        return propositionBatchEmbeddingEnabled;
+    }
+
+    public int propositionEmbeddingBatchSize() {
+        return propositionEmbeddingBatchSize;
     }
 
     public double maxFailedChunkRatio() {

@@ -41,6 +41,7 @@ public class DiceDocumentEnricher {
     private final ExecutorService propositionPersistenceExecutor;
     private final DiceIngestionProperties properties;
     private final DiceResolutionLookupCache resolverLookupCache;
+    private final DiceBatchEmbeddingCoordinator batchEmbeddingCoordinator;
 
     public DiceDocumentEnricher(
             PropositionPipeline propositionPipeline,
@@ -54,7 +55,8 @@ public class DiceDocumentEnricher {
             @Qualifier("dicePropositionPersistenceExecutor")
             ExecutorService propositionPersistenceExecutor,
             DiceIngestionProperties properties,
-            DiceResolutionLookupCache resolverLookupCache
+            DiceResolutionLookupCache resolverLookupCache,
+            DiceBatchEmbeddingCoordinator batchEmbeddingCoordinator
     ) {
         this.propositionPipeline =
                 Objects.requireNonNull(
@@ -102,6 +104,7 @@ public class DiceDocumentEnricher {
                 propositionPersistenceExecutor, "propositionPersistenceExecutor must not be null");
         this.properties = Objects.requireNonNull(properties, "properties must not be null");
         this.resolverLookupCache = Objects.requireNonNull(resolverLookupCache, "resolverLookupCache");
+        this.batchEmbeddingCoordinator = Objects.requireNonNull(batchEmbeddingCoordinator, "batchEmbeddingCoordinator");
     }
 
     public DiceEnrichmentResult enrich(
@@ -427,14 +430,23 @@ public class DiceDocumentEnricher {
             return List.of();
         }
 
+        // Precompute remote embeddings before any per-proposition Neo4j write.
+        // This remains per-document, never a cross-tenant or global text cache.
+        DiceBatchEmbeddingCoordinator.PreparedBatch prepared =
+                properties.propositionBatchEmbeddingEnabled()
+                ? batchEmbeddingCoordinator.precompute(
+                        propositions, properties.propositionEmbeddingBatchSize(), documentId)
+                : null;
+
         if (properties.propositionPersistenceThreads() == 1
                 || TransactionSynchronizationManager.isActualTransactionActive()) {
             List<Proposition> saved = new ArrayList<>(propositions.size());
             for (int i = 0; i < propositions.size(); i++) {
                 long started = System.nanoTime();
-                saved.add(propositionRepository.save(propositions.get(i)));
+                saved.add(saveProposition(propositions.get(i), prepared));
                 logSlowSave(documentId, i, started);
             }
+            batchEmbeddingCoordinator.logUsage(prepared, documentId);
             return saved;
         }
 
@@ -444,7 +456,7 @@ public class DiceDocumentEnricher {
             final Proposition proposition = propositions.get(i);
             futures.add(propositionPersistenceExecutor.submit(() -> {
                 long started = System.nanoTime();
-                Proposition saved = propositionRepository.save(proposition);
+                Proposition saved = saveProposition(proposition, prepared);
                 long elapsedMs = (System.nanoTime() - started) / 1_000_000;
                 return new PropositionSave(index, saved, elapsedMs);
             }));
@@ -489,7 +501,19 @@ public class DiceDocumentEnricher {
         }
         logger.info("DICE proposition save timing documentId={} totalSaveMs={} maxSaveMs={} count={}",
                 documentId, sumSaveMs, maxSaveMs, ordered.size());
+        batchEmbeddingCoordinator.logUsage(prepared, documentId);
         return ordered;
+    }
+
+    private Proposition saveProposition(Proposition proposition,
+                                        DiceBatchEmbeddingCoordinator.PreparedBatch prepared) {
+        if (prepared == null || proposition.getText().isBlank()) {
+            return propositionRepository.save(proposition);
+        }
+        // DICE still receives its normal save() call. Its embeddingService's
+        // embed(String) returns the vector precomputed for this ingestion.
+        return batchEmbeddingCoordinator.withPrepared(prepared,
+                () -> propositionRepository.save(proposition));
     }
 
     private void logSlowSave(String documentId, int index, long started) {

@@ -2,6 +2,7 @@ package com.sparrowx.document.config;
 
 import com.embabel.common.ai.model.EmbeddingService;
 import com.embabel.common.ai.model.SpringAiEmbeddingService;
+import com.sparrowx.document.ingestion.embabel.DiceBatchEmbeddingCoordinator;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -13,6 +14,11 @@ import org.springframework.context.annotation.Configuration;
 public class DeepInfraEmbeddingConfiguration {
 
     @Bean
+    public DiceBatchEmbeddingCoordinator diceBatchEmbeddingCoordinator() {
+        return new DiceBatchEmbeddingCoordinator();
+    }
+
+    @Bean
     @ConditionalOnProperty(
             prefix = "sparrowx.document.embedding",
             name = "provider",
@@ -22,14 +28,15 @@ public class DeepInfraEmbeddingConfiguration {
             EmbeddingModel embeddingModel,
             EmbeddingConfig.EmbeddingProperties properties,
             @Value("${DOCUMENT_EMBEDDING_MODEL:Qwen/Qwen3-Embedding-8B}")
-            String modelName
+            String modelName,
+            DiceBatchEmbeddingCoordinator coordinator
     ) {
-        return new SpringAiEmbeddingService(
+        return coordinator.wrap(new SpringAiEmbeddingService(
                 modelName,
                 "DeepInfra",
                 embeddingModel,
                 properties.dimension(),
                 null
-        );
+        ));
     }
 }

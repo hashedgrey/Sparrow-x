@@ -73,6 +73,7 @@ embabel:
             base-url: https://api.deepseek.com
             api-key: ${DEEPSEEK_API_KEY}
             models: ${DOCUMENT_LLM_MODEL:deepseek-flash}
+            read-timeout: 90s
     rag:
       graph:
         uri: ${NEO4J_URI:bolt://localhost:7687}
