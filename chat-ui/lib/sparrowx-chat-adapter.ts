@@ -73,11 +73,11 @@ function withTypedTrace(traces: SparrowTrace[], payload: Record<string, unknown>
   const previous = index === -1 ? undefined : traces[index];
   const statusValue = String(payload.status ?? "RUNNING").toUpperCase();
   const status: SparrowTrace["status"] = statusValue === "SUCCEEDED" ? "succeeded"
-    : statusValue === "FAILED" ? "failed" : statusValue === "PAUSED" ? "paused" : "running";
+      : statusValue === "FAILED" ? "failed" : statusValue === "PAUSED" ? "paused" : "running";
   const parsedAt = Date.parse(String(payload.emittedAt ?? ""));
   const when = Number.isFinite(parsedAt) ? parsedAt : Date.now();
   const startedAt = previous?.startedAt ?? (typeof payload.startedAt === "string"
-    ? Date.parse(payload.startedAt) : when);
+      ? Date.parse(payload.startedAt) : when);
   const endedAt = status === "running" ? undefined : when;
   const safeAttributes: Record<string, string> = {};
   if (payload.attributes && typeof payload.attributes === "object") {
@@ -137,7 +137,7 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
       cachedInputTokens: 0, outputTokens: 0, totalTokens: 0, embeddingTokens: 0, vectorsGenerated: 0 };
 
     const cancelMission = () => {
-      if (!missionId) return;
+      if (!missionId || complete) return;
       void fetch("/api/chat/cancel", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ missionId, reason: "Stopped by user" }), keepalive: true,
@@ -147,12 +147,12 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
     const currentResult = () => ({
       content: (finalAnswer || streamedAnswer) ? [{ type: "text" as const, text: finalAnswer || streamedAnswer }] : [],
       metadata: { custom: { sparrowx: {
-        missionId, missionStatus, missionPath, progress, traces, executiveSummary: executiveSummary || undefined,
-        citations, complete, walkthroughSignals: walkthroughSignals.slice(),
-        timing: { firstTokenMs, totalMs, chunks,
-          tokensPerSecond: totalMs && usage.outputTokens ? usage.outputTokens / (totalMs / 1000) : undefined },
-        usage,
-      } satisfies SparrowMetadata } },
+            missionId, missionStatus, missionPath, progress, traces, executiveSummary: executiveSummary || undefined,
+            citations, complete, walkthroughSignals: walkthroughSignals.slice(),
+            timing: { firstTokenMs, totalMs, chunks,
+              tokensPerSecond: totalMs && usage.outputTokens ? usage.outputTokens / (totalMs / 1000) : undefined },
+            usage,
+          } satisfies SparrowMetadata } },
     });
 
     try {
@@ -170,7 +170,10 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
         while (true) {
           const { done, value } = await reader.read();
           buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-          buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+          // A network chunk can end between the CR and LF of one line ending.
+          const pendingCr = !done && buffer.endsWith("\r");
+          const framed = pendingCr ? buffer.slice(0, -1) : buffer;
+          buffer = framed.replace(/\r\n?/g, "\n") + (pendingCr ? "\r" : "");
           let boundary = buffer.indexOf("\n\n");
           while (boundary !== -1) {
             const block = buffer.slice(0, boundary);
@@ -238,7 +241,10 @@ export const sparrowxChatAdapter: ChatModelAdapter = {
                 break;
               }
               case "RUN_FINISHED": recordSignal({ event: "complete" }); complete = true; missionStatus = "COMPLETED"; totalMs = performance.now() - start; break;
-              case "RUN_ERROR": recordSignal({ event: "error" }); throw new Error(event.message || "SparrowX mission failed");
+              case "RUN_ERROR":
+                recordSignal({ event: "error" });
+                yield currentResult();
+                throw new Error(event.message || "SparrowX mission failed");
             }
             yield currentResult();
             if (complete) return;

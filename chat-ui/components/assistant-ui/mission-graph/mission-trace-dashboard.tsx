@@ -250,12 +250,12 @@ export const MissionTraceDashboard: FC<Props> = ({
   if (!showEmpty && !metadata?.missionId && traces.length === 0) return null;
 
   return (
-    <section ref={containerRef} className="sp-walkthrough" aria-label="SparrowX mission walkthrough">
+    <section ref={containerRef} className="sp-walkthrough" aria-label="SparrowX Query Studio">
       <header className="sp-head">
         <div className="sp-head-main">
           <span className="sp-brand-icon" aria-hidden="true"><Route size={19} /></span>
           <span className="sp-head-identity">
-            <span className="sp-head-title"><strong>Mission walkthrough</strong><span className="sp-planner-chip">{planner}</span></span>
+            <span className="sp-head-title"><strong>Query Studio</strong><span className="sp-planner-chip">{planner}</span></span>
             <span className="sp-run-id" title={metadata?.missionId}>{metadata?.missionId || "No mission started"}</span>
           </span>
         </div>

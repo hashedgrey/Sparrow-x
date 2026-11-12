@@ -4,10 +4,11 @@ import {
   createContext, useCallback, useContext, useEffect, useMemo, useState,
   type FC, type ReactNode,
 } from "react";
-import { Activity, Clock3, Route } from "lucide-react";
+import { Activity, Clock3, GitBranch, Route } from "lucide-react";
 import type { SparrowMetadata, SparrowTrace } from "@/lib/sparrowx-chat-adapter";
 
-/** The workspace header gets factual run data from the mission cards mounted in messages. */
+export type WorkspaceMode = "studio" | "walkthrough";
+
 type MissionHeaderSnapshot = {
   metadata?: SparrowMetadata;
   missionId: string;
@@ -31,7 +32,7 @@ export const MissionWorkspaceProvider: FC<{ children?: ReactNode }> = ({ childre
   const [mission, setMission] = useState<MissionHeaderSnapshot | null>(null);
   const publish = useCallback((next: MissionHeaderSnapshot) => {
     setMission(prev => {
-      // Multiple prior message dashboards can be mounted simultaneously. The newest run wins.
+      // Historical message dashboards may also publish. The latest run wins.
       if (prev && prev.missionId !== next.missionId && prev.startedAt > next.startedAt) return prev;
       if (prev && prev.missionId === next.missionId && prev.totalMs === next.totalMs &&
           prev.eventCount === next.eventCount && prev.status === next.status &&
@@ -56,7 +57,6 @@ export function usePublishMissionSummary(summary: MissionHeaderSnapshot | null):
   useEffect(() => { if (summary) publish?.(summary); }, [publish, summary]);
 }
 
-/** Keep the empty-thread dashboard free of stale stats from a previous thread. */
 export const ResetMissionHeader: FC = () => {
   const context = useContext(MissionWorkspaceContext);
   const reset = context?.reset;
@@ -64,82 +64,68 @@ export const ResetMissionHeader: FC = () => {
   return null;
 };
 
-// Do not manufacture token counts: absent metrics render as em-dash, while an actual 0 stays 0.
-function numberAt(raw: unknown, ...paths: string[]): number | undefined {
-  for (const path of paths) {
-    let node: unknown = raw;
-    for (const key of path.split(".")) {
-      if (node === null || typeof node !== "object" || !(key in node)) { node = undefined; break; }
-      node = (node as Record<string, unknown>)[key];
-    }
-    if (typeof node === "number" && Number.isFinite(node) && node >= 0) return node;
-    if (typeof node === "string" && node.trim() && Number.isFinite(Number(node)) && Number(node) >= 0) return Number(node);
-  }
-  return undefined;
-}
-function metricSeconds(ms?: number): string {
-  return ms === undefined ? "—" : `${(ms / 1000).toFixed(2)}s`;
-}
-function count(n?: number): string { return n === undefined ? "—" : n.toLocaleString(); }
-
-export const MissionWorkspaceHeader: FC = () => {
+export const MissionWorkspaceHeader: FC<{
+  mode: WorkspaceMode;
+  onModeChange: (next: WorkspaceMode) => void;
+  isRunning?: boolean;
+  autoShowSteps: boolean;
+  onAutoShowStepsChange: (checked: boolean) => void;
+}> = ({ mode, onModeChange, isRunning = false, autoShowSteps, onAutoShowStepsChange }) => {
   const context = useContext(MissionWorkspaceContext);
   const mission = context?.mission;
-  const [metricsOpen, setMetricsOpen] = useState(false);
-  const metricRows = useMemo(() => {
-    const raw = mission?.metadata;
-    const first = numberAt(raw, "timing.firstResponseMs", "timing.timeToFirstTokenMs", "timing.ttftMs", "metrics.firstResponseMs");
-    const total = mission?.totalMs;
-    const speed = numberAt(raw, "timing.tokensPerSecond", "metrics.tokensPerSecond", "usage.tokensPerSecond");
-    const input = numberAt(raw, "tokens.input", "usage.inputTokens", "usage.promptTokens", "metrics.inputTokens", "tokenUsage.inputTokens");
-    const cached = numberAt(raw, "tokens.cachedInput", "usage.cachedInputTokens", "usage.promptCachedTokens", "metrics.cachedInputTokens");
-    const output = numberAt(raw, "tokens.output", "usage.outputTokens", "usage.completionTokens", "metrics.outputTokens", "tokenUsage.outputTokens");
-    const all = numberAt(raw, "tokens.total", "usage.totalTokens", "metrics.totalTokens", "tokenUsage.totalTokens") ??
-      (input !== undefined && output !== undefined ? input + output : undefined);
-    return [
-      ["First response", metricSeconds(first)],
-      ["Total", metricSeconds(total)],
-      ["Speed", speed === undefined ? "—" : `${speed.toFixed(1)} tok/s`],
-      ["Events", mission ? count(mission.eventCount) : "—"],
-      ["Input", count(input)],
-      ["Cached input", count(cached)],
-      ["Output", count(output)],
-      ["Total tokens", count(all)],
-    ] as const;
-  }, [mission]);
-  const displayStatus = mission?.status || "Ready";
-  // Transport completion and mission-goal certification are separate facts.
+  const displayStatus = isRunning ? "Running" : mission?.status || "Ready";
+  // Successful transport completion is not equivalent to goal certification.
   const latestFinish = mission?.traces.findLast(trace => trace.kind === "MISSION_FINISH");
   const goalStatus = latestFinish?.attributes?.goalStatus;
   const uncertified = Boolean(goalStatus && goalStatus !== "SATISFIED");
+  const displayDuration = mission?.totalMs != null && Number.isFinite(mission.totalMs)
+    ? `${(mission.totalMs / 1000).toFixed(2)}s` : null;
+
   return (
-    <header className="sp-workspace-toolbar" aria-label="Mission workspace toolbar">
+    <header className="sp-workspace-toolbar" aria-label="Query Studio toolbar">
       <div className="sp-workspace-identity">
         <span className="sp-workspace-logo" aria-hidden="true"><Route size={19} /></span>
         <div className="sp-workspace-identity-text">
           <div className="sp-workspace-title-line">
             <strong>Query Studio</strong>
-            {mission?.planner && mission.planner !== "—" && <span className="sp-workspace-planner">{mission.planner}</span>}
+            {mission?.planner && mission.planner !== "—" &&
+              <span className="sp-workspace-planner">{mission.planner}</span>}
           </div>
           <span className="sp-workspace-mission-id" title={mission?.missionId || ""}>
             {mission?.missionId || "No mission started"}
           </span>
         </div>
       </div>
+
+      <nav className="sp-workspace-modes" aria-label="Workspace mode">
+        <button type="button" className={mode === "studio" ? "sp-mode-active" : ""}
+          aria-current={mode === "studio" ? "page" : undefined}
+          onClick={() => onModeChange("studio")}
+          aria-controls="sp-studio-panel">
+          <Activity size={15} aria-hidden="true" /> Query Studio
+        </button>
+        <button type="button" className={mode === "walkthrough" ? "sp-mode-active" : ""}
+          aria-current={mode === "walkthrough" ? "page" : undefined}
+          onClick={() => onModeChange("walkthrough")}
+          aria-controls="sp-walkthrough-panel">
+          <GitBranch size={15} aria-hidden="true" /> Walkthrough
+        </button>
+      </nav>
+
       <div className="sp-workspace-right">
-        <div className="sp-metrics-wrap" onMouseLeave={() => setMetricsOpen(false)}>
-          <button type="button" className="sp-metrics-trigger" aria-label="Execution metrics" aria-expanded={metricsOpen}
-            aria-haspopup="true" onClick={() => setMetricsOpen(x => !x)}>
-            <Clock3 size={16} aria-hidden="true" />
-            <span>{metricSeconds(mission?.totalMs)}</span>
-          </button>
-          <div className={`sp-metrics-popover ${metricsOpen ? "sp-metrics-visible" : ""}`} role="group" aria-label="Execution metrics breakdown">
-            <div className="sp-metrics-popover-heading"><Activity size={14} /> Execution metrics</div>
-            {metricRows.map(([label, value]) => <div className="sp-metrics-row" key={label}>
-              <span>{label}</span><strong>{value}</strong>
-            </div>)}
-          </div>
-        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoShowSteps}
+          aria-label="Automatically switch to steps when streaming begins"
+          title={autoShowSteps ? "Show steps when the first stream event arrives" : "Stay in Chat while events stream"}
+          className={`sp-stream-switch ${autoShowSteps ? "sp-stream-switch-on" : ""}`}
+          onClick={() => onAutoShowStepsChange(!autoShowSteps)}
+        >
+          <span className="sp-stream-switch-label">Auto-show steps</span>
+          <span className="sp-stream-switch-track" aria-hidden="true"><span className="sp-stream-switch-thumb" /></span>
+        </button>
+        {displayDuration && <span className="sp-workspace-duration"><Clock3 size={15} aria-hidden="true" />{displayDuration}</span>}
         <span className={`sp-workspace-state ${/FAIL|BLOCK/i.test(displayStatus) ? "sp-workspace-state-fail" : uncertified ? "sp-workspace-state-uncertified" : ""}`}
           title={goalStatus ? `User goal certification: ${goalStatus}` : "Mission lifecycle status"}>
           {displayStatus.toLowerCase() === "completed" ? "Done" : displayStatus}

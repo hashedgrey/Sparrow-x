@@ -563,3 +563,27 @@
     animation: none; opacity: .8; transform: none;
   }
 }
+
+/* Crossfade Chat and Steps only after the first observed stream event.
+   Both layers stay mounted, preserving drafts, message telemetry and step state. */
+.sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-chat-pane,
+.sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-content {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+  transition: opacity 270ms ease-out, transform 320ms cubic-bezier(.22, 1, .36, 1), visibility 0s linear 0s;
+}
+.sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-pane-hidden {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(9px) scale(.992);
+  pointer-events: none;
+  transition: opacity 230ms ease-in, transform 270ms ease-in, visibility 0s linear 270ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-chat-pane,
+  .sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-content,
+  .sp-mission-shell .sp-walkthrough .sp-main-stage > .sp-pane-hidden {
+    transition: none; transform: none;
+  }
+}
