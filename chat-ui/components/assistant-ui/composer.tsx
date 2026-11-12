@@ -2,7 +2,7 @@
 
 import { AuiIf, ComposerPrimitive, useAui } from "@assistant-ui/react";
 import { ArrowUpIcon, CheckIcon, ChevronDownIcon, FileSearchIcon, ImageIcon, Lightbulb, Mic, NetworkIcon, Paperclip, PencilRuler, PlusIcon, SearchIcon, Telescope } from "lucide-react";
-import { useState, type FC, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FC, type ReactNode } from "react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ArrowAttachment } from "./attachment";
 
@@ -205,9 +205,133 @@ export const ThreadSuggestions: FC = () => {
 const ghostBtnClass =
     "flex shrink-0 items-center justify-center rounded-full text-[#444746] transition-colors hover:bg-[#444746]/8 hover:text-[#1f1f1f] dark:text-[#c4c7c5] dark:hover:bg-[#c4c7c5]/10 dark:hover:text-[#e3e3e3]";
 
+type IngestionUpload = {
+    id: string;
+    name: string;
+    status: string;
+    documentId?: string;
+    ingestionJobId?: string;
+    chunksCreated?: number;
+    chunksIndexed?: number;
+    error?: string;
+};
+
+const TERMINAL_STATUSES = new Set(["COMPLETED", "FAILED", "ERROR"]);
+const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
+
 export const Composer: FC = () => {
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const [uploads, setUploads] = useState<IngestionUpload[]>([]);
+
+    const onDocumentsSelected = (event: ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(event.currentTarget.files ?? []).slice(0, 5);
+        event.currentTarget.value = "";
+        for (const file of files) {
+            const id = crypto.randomUUID();
+            setUploads((prev) => [{ id, name: file.name, status: "UPLOADING" }, ...prev].slice(0, 8));
+            void (async () => {
+                try {
+                    if (file.size > MAX_DOCUMENT_BYTES) throw new Error("File exceeds 20 MB");
+                    const form = new FormData();
+                    form.set("file", file, file.name);
+                    const response = await fetch("/api/documents", { method: "POST", body: form });
+                    const payload = await response.json() as {
+                        documentId?: string; ingestionJobId?: string; error?: string;
+                    };
+                    if (!response.ok || !payload.documentId || !payload.ingestionJobId) {
+                        throw new Error(payload.error || `Upload failed (HTTP ${response.status})`);
+                    }
+                    setUploads((prev) => prev.map((entry) => entry.id === id
+                        ? { ...entry, documentId: payload.documentId, ingestionJobId: payload.ingestionJobId, status: "QUEUED" }
+                        : entry));
+                } catch (reason) {
+                    setUploads((prev) => prev.map((entry) => entry.id === id
+                        ? { ...entry, status: "ERROR", error: reason instanceof Error ? reason.message : "Upload failed" }
+                        : entry));
+                }
+            })();
+        }
+    };
+
+    // The upload RPC only queues ingestion; track the actual worker job until terminal.
+    const pollingJobs = uploads
+        .filter((item) => item.ingestionJobId && !TERMINAL_STATUSES.has(item.status))
+        .map((item) => ({ id: item.id, jobId: item.ingestionJobId! }));
+    const pollingKey = pollingJobs.map((item) => `${item.id}:${item.jobId}`).join("|");
+    useEffect(() => {
+        if (!pollingKey) return;
+        const controller = new AbortController();
+        let inFlight = false;
+        const poll = async () => {
+            if (inFlight) return;
+            inFlight = true;
+            try {
+                await Promise.all(pollingJobs.map(async ({ id, jobId }) => {
+                    try {
+                        const response = await fetch(`/api/documents/jobs/${encodeURIComponent(jobId)}`, {
+                            cache: "no-store", signal: controller.signal,
+                        });
+                        const body = await response.json() as {
+                            status?: string; chunksCreated?: number; chunksIndexed?: number;
+                            failureReason?: string; error?: string;
+                        };
+                        if (!response.ok) throw new Error(body.error || `Job lookup returned HTTP ${response.status}`);
+                        if (!controller.signal.aborted) {
+                            setUploads((prev) => prev.map((item) => item.id === id ? {
+                                ...item, status: body.status || item.status,
+                                chunksCreated: body.chunksCreated, chunksIndexed: body.chunksIndexed,
+                                error: body.status === "FAILED" ? body.failureReason : undefined,
+                            } : item));
+                        }
+                    } catch (error) {
+                        if (!controller.signal.aborted) {
+                            setUploads((prev) => prev.map((item) => item.id === id ? {
+                                ...item, status: "ERROR",
+                                error: error instanceof Error ? error.message : "Status lookup failed",
+                            } : item));
+                        }
+                    }
+                }));
+            } finally { inFlight = false; }
+        };
+        void poll();
+        const interval = setInterval(() => { void poll(); }, 2500);
+        return () => { clearInterval(interval); controller.abort(); };
+        // The polling job IDs are fully captured by pollingKey.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pollingKey]);
+
     return (
         <ComposerPrimitive.Root className="mx-auto flex w-full max-w-2xl flex-col rounded-2xl bg-white p-3 dark:bg-[#1e1f20]">
+            <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.txt,.md,.docx"
+                multiple
+                className="hidden"
+                aria-label="Upload documents"
+                onChange={onDocumentsSelected}
+            />
+            {uploads.length > 0 && (
+                <div aria-live="polite" aria-label="Document ingestion status" className="mb-2 flex max-h-36 flex-col gap-1 overflow-y-auto px-1 text-xs text-[#444746] dark:text-[#c4c7c5]">
+                    {uploads.map((upload) => (
+                        <div key={upload.id} className="flex items-center gap-2 rounded-lg border border-[#dadce0] px-2 py-1.5 dark:border-[#3c4043]">
+                            <Paperclip className="size-3.5 shrink-0" />
+                            <span className="min-w-0 flex-1 truncate" title={upload.name}>{upload.name}</span>
+                            <span className="shrink-0" title={upload.error}>
+                                {upload.status === "COMPLETED" ? "Ready to query"
+                                    : upload.status === "UPLOADING" ? "Uploading…"
+                                    : upload.status === "ERROR" || upload.status === "FAILED" ? `Failed: ${upload.error ?? upload.status}`
+                                    : `${upload.status.toLowerCase()}${upload.chunksCreated ? ` · ${upload.chunksIndexed ?? 0}/${upload.chunksCreated}` : ""}`}
+                            </span>
+                            <button type="button" aria-label={`Dismiss ${upload.name}`} className="shrink-0 hover:opacity-60"
+                                onClick={() => setUploads((prev) => prev.filter((entry) => entry.id !== upload.id))}>
+                                <span aria-hidden="true">×</span>
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            )}
 
             <AuiIf condition={(s) => s.composer.attachments.length > 0}>
                 <div className="flex flex-row gap-2.5 overflow-x-auto px-1 pt-1 pb-2.5">
@@ -218,7 +342,7 @@ export const Composer: FC = () => {
             </AuiIf>
 
             <div className="flex items-end gap-1">
-                <ArrowPlusMenu />
+                <ArrowPlusMenu onUploadClick={() => fileInputRef.current?.click()} />
                 <ComposerPrimitive.Input
                     rows={1}
                     placeholder="Ask Arrow"
@@ -247,7 +371,7 @@ const ARROW_TOOLS = [
     { id: "learn", label: "Guided Learning", Icon: Lightbulb },
 ];
 
-const ArrowPlusMenu: FC = () => {
+const ArrowPlusMenu: FC<{ onUploadClick: () => void }> = ({ onUploadClick }) => {
     return (
         <DropdownMenu>
             <DropdownMenuTrigger
@@ -257,11 +381,11 @@ const ArrowPlusMenu: FC = () => {
                 <PlusIcon width={20} height={20} />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" side="bottom" className="min-w-56">
-                <DropdownMenuItem render={<ComposerPrimitive.AddAttachment />}>
-    <span className="flex size-4 items-center justify-center">
-    <Paperclip className="size-4" />
-        </span>
-                    Add photos &amp; files
+                <DropdownMenuItem onClick={onUploadClick}>
+                    <span className="flex size-4 items-center justify-center">
+                        <Paperclip className="size-4" />
+                    </span>
+                    Upload documents
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 {ARROW_TOOLS.map(({ id, label, Icon }) => (
