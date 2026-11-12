@@ -4,6 +4,9 @@ import com.sparrowx.agentic.decision.SemanticDecisionService;
 import com.sparrowx.agentic.mission.artifact.PreparedArtifact;
 import com.sparrowx.agentic.mission.model.MissionPath;
 import com.sparrowx.agentic.planning.MissionIntent;
+import com.sparrowx.agentic.planning.MissionCapabilities;
+import com.sparrowx.agentic.governance.ToolAuthorizationPolicy;
+import com.sparrowx.agentic.governance.SourceAuthorizationPolicy;
 import com.sparrowx.agentic.planning.PlannerMode;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionQuestion;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionResponse;
@@ -45,6 +48,13 @@ public final class IntentComponent {
     private double hybridThreshold = 0.60d;
     @org.springframework.beans.factory.annotation.Value("${sparrowx.intent.min-decision-confidence:0.75}")
     private double minDecisionConfidence = 0.75d;
+
+    // Public empty lists mean "use server policy" only at this boundary.
+    // Persisted MissionIntent lists below are explicit, effective grants.
+    @org.springframework.beans.factory.annotation.Value("${sparrowx.authorization.allowed-tools:document.evidence.build,internal.entities.search,internal.company-graph.read}")
+    private String configuredTools = "document.evidence.build,internal.entities.search,internal.company-graph.read";
+    @org.springframework.beans.factory.annotation.Value("${sparrowx.authorization.allowed-source-services:document-service,internal-service}")
+    private String configuredSources = "document-service,internal-service";
 
     private static final String DOCUMENT = "requires_document_evidence";
     private static final String INTERNAL = "requires_internal_context";
@@ -148,6 +158,17 @@ public final class IntentComponent {
         }
         attributes.put("preparedArtifactCount", request.artifacts().size());
 
+        Set<String> sources = new SourceAuthorizationPolicy().effectiveAllowlist(
+                policyNames(configuredSources), request.allowedSourceServices(), Set.of());
+        Set<String> tools = new ToolAuthorizationPolicy().effectiveAllowlist(
+                policyNames(configuredTools), request.allowedTools(), Set.of());
+        Set<String> effectiveTools = tools.stream()
+                .filter(tool -> Set.of(MissionCapabilities.DOCUMENT_EVIDENCE,
+                        MissionCapabilities.INTERNAL_SEARCH, MissionCapabilities.COMPANY_GRAPH).contains(tool))
+                .filter(tool -> sources.contains(MissionCapabilities.sourceFor(tool)))
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        attributes.put("authorizationPolicy", "EXPLICIT_EFFECTIVE_GRANTS_V1");
+
         return new MissionIntent(
                 request.missionId(),
                 request.query(),
@@ -163,10 +184,15 @@ public final class IntentComponent {
                 request.requireCitations(),
                 requiresVerification,
                 request.allowExternalSources(),
-                request.allowedTools(),
-                request.allowedSourceServices(),
+                effectiveTools,
+                sources,
                 Map.copyOf(attributes)
         );
+    }
+
+    private static List<String> policyNames(String csv) {
+        return csv == null ? List.of() : java.util.Arrays.stream(csv.split(","))
+                .map(String::trim).filter(name -> !name.isEmpty()).toList();
     }
 
     /**
