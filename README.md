@@ -77,23 +77,35 @@ Embabel executes registered actions using **GOAP** or **HYBRID** planning, with 
 
 When the original query has already been attempted but evidence remains insufficient, **generative LLM escalation** can produce a distinct, targeted follow-up subquery for an eligible capability. The LLM refines *what to investigate next*, not *which tool to execute* or *whether the goal is satisfied*.
 
+
 ```mermaid
 flowchart TD
-    A[Register mission goal] --> B[System 1: Evaluate goal and evidence]
-    B --> C{Goal status}
-    C -->|Needs evidence| D[System 1: Score eligible capabilities]
-    D --> E[Embabel: Select action using GOAP/HYBRID]
-    E --> F{Original query already attempted?}
-    F -->|No| G[Execute original query]
-    F -->|Yes| H[System 2: LLM: Generate distinct follow-up subquery]
-    H --> I[Execute authorized capability]
-    G --> J[Update evidence and blackboard]
-    I --> J
-    J --> B
-    C -->|Satisfied or ready| K[Grounded synthesis and validation]
-    C -->|Blocked or ambiguous| L[Unresolved outcome]
-    K --> M[Final mission result]
-    L --> M
+    A[Submit mission] --> B[System 1: Classify intent and requirements]
+    B --> C[Persist mission and checkpoints]
+    C --> D[Temporal workflow]
+    D --> E[Embabel: Register goal]
+    E --> F[System 1: Review goal and evidence]
+    F --> G{Goal status}
+
+    G -->|Needs evidence| H[Score eligible capabilities]
+    H --> I{New subquery needed?}
+    I -->|Yes| J[Escalate to generative LLM]
+    I -->|No| K[Use original query]
+
+    J --> L[Embabel: GOAP/HYBRID action selection]
+    K --> L
+    L --> M[Execute authorized capability]
+    M --> N[Update evidence and blackboard]
+    N --> F
+
+    G -->|Satisfied or ready| O[Grounded synthesis and validation]
+    G -->|Blocked or ambiguous| P[Unresolved outcome]
+
+    O --> Q[Persist and stream result]
+    P --> Q
+
+    D -.->|Approval required| R[Human review gate]
+    R -.-> D
 ```
 
 The execution loop continues until the goal is satisfied, evidence is exhausted, or an execution constraint prevents further progress. **Generative escalation never overrides System 1's bounded judgments, Embabel's action selection, or deterministic governance rules.**
