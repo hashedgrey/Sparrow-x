@@ -380,6 +380,24 @@ services:
 
 
 
+  #######################################################
+  # Kibana - Elasticsearch UI
+  #######################################################
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.0
+    container_name: kibana
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    environment:
+      SERVER_HOST: "0.0.0.0"
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    ports:
+       - "5601:5601"
+    networks:
+       - infrastructure
+
+
 
   #######################################################
   # Keycloak
