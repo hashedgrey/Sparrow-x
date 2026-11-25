@@ -29,6 +29,23 @@ The stages are **logical concerns**, not a fixed list of Java actions. Embabel m
 - **Retry limits:** A failed capability/query may receive a bounded same-query retry. A completed invocation requires a distinct evidence subquery before another attempt.
 - **Certification:** `GOAL_SATISFIED` depends on admitted evidence and final `goalCertified`, not merely a reviewer vote. An uncertified partial report may still communicate verified findings without claiming the investigation is complete.
 
+## Illustrative planning behavior
+
+The following example explains the decision boundaries; it is not a recorded mission trace or a fixed sequence of actions.
+
+Initially, document retrieval and internal entity search may both be eligible if authorized and required. Company-graph retrieval cannot execute until a suitable root scope is available from internal search. JEV can estimate the marginal value of each eligible capability, but its scores cannot bypass that prerequisite.
+
+| Planning strategy | Behavior |
+|---|---|
+| GOAP | Searches the modeled route to the terminal goal. If root resolution and graph retrieval are expressed as required transitions, they constrain the valid path. |
+| HYBRID | During utility-based exploration, ranks eligible actions by immediate net utility. Document retrieval may run before internal search if its utility is higher; the graph remains unavailable until its prerequisite is met. |
+
+Neither planner inherently requires internal search to precede document retrieval. That order is only required where an explicit dependency or policy demands it. GOAP cannot infer undocumented source authority, and HYBRID cannot guarantee minimum total path cost.
+
+After an action returns, the reviewer evaluates the accumulated evidence against the original objective. If graph proof is missing, the ownership requirement remains unresolved regardless of how convincing the document evidence appears. Required evidence cannot be waived by a high JEV satisfaction score. Final certification remains separate from both planner selection and semantic review.
+
+See [Agent decision architecture](../architecture/agent-decisions.md) for planner semantics and the HYBRID configuration check.
+
 ## What a useful answer contains
 
 1. **Identified service and owner:** supported by Internal Service entities and relationships.

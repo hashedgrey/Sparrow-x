@@ -14,12 +14,12 @@
 
 ## Capabilities
 
-- **Internal knowledge discovery** — resolve service owners, engineers, teams, repositories, dependencies, architecture documents and runbooks.
-- **Evidence-backed investigations** — connect incident reports, operating procedures and company relationships; identify supported findings and unresolved questions.
-- **Operational analysis** — compare deployment practices, documented standards and incident history; produce grounded assessments and recommendations.
-- **Observable agent execution** — inspect JEV-scored evidence candidates, Embabel-selected actions, goal reviews, evidence acquisition, model usage, traces and streamed results.
-- **Document intelligence** — upload source documents, track ingestion jobs, and retrieve project/team-scoped evidence using hybrid keyword/vector ranking.
-- **Durable missions** — persist mission identity and execution inputs, coordinate retries and approvals, and support cancellation through Temporal.
+- **Internal knowledge discovery** - resolve service owners, engineers, teams, repositories, dependencies, architecture documents and runbooks.
+- **Evidence-backed investigations** - connect incident reports, operating procedures and company relationships; identify supported findings and unresolved questions.
+- **Operational analysis** - compare deployment practices, documented standards and incident history; produce grounded assessments and recommendations.
+- **Observable agent execution** - inspect JEV-scored evidence candidates, Embabel-selected actions, goal reviews, evidence acquisition, model usage, traces and streamed results.
+- **Document intelligence** - upload source documents, track ingestion jobs, and retrieve project/team-scoped evidence using hybrid keyword/vector ranking.
+- **Durable missions** - persist mission identity and execution inputs, coordinate retries and approvals, and support cancellation through Temporal.
 
 SparrowX retrieves and reasons over authorized internal sources. A security-oriented question is not itself proof of a detected intrusion: incident detection and telemetry correlation require the corresponding data sources and integrations.
 
@@ -27,7 +27,7 @@ SparrowX retrieves and reasons over authorized internal sources. A security-orie
 
 | Component | Responsibility | Runtime |
 |---|---|---|
-| **Agentic Service** (`agenticsvc`) | Mission submission, frozen authorization and intent, JEV goal/utility evaluation, Embabel action selection, evidence admission and synthesis | Spring Boot; HTTP + gRPC |
+| **Agentic Service** (`agenticsvc`) | Mission submission, frozen authorization and intent, JEV semantic goal/utility evaluation, Embabel symbolic planning and action selection, evidence admission and synthesis | Spring Boot; HTTP + gRPC |
 | **Internal Service** (`intsvc`) | Engineers, teams, modules, repositories, ownership, runbooks and organizational graph context | Spring Boot; PostgreSQL + Neo4j |
 | **Document Service** (`docsvc`) | HTTP/gRPC ingestion and job status, extraction, DICE proposition embedding, scoped keyword/vector retrieval, rank fusion, citations and evidence graphs | Spring Boot; PostgreSQL + MinIO + Qdrant + Elasticsearch + Neo4j |
 | **Building Blocks** (`bb`) | Shared command/query handling, validation, resilience, context propagation and observability primitives | Maven library, not a running service |
@@ -55,28 +55,43 @@ Infrastructure runs under Docker Compose; the three application services run loc
 
 ## How the agent makes decisions
 
-SparrowX separates **bounded judgment** from **goal-directed execution**.
+SparrowX separates **semantic judgment, symbolic planning, deterministic governance and generative reasoning**. System 1 interprets the mission and evaluates evidence; Embabel determines executable actions using an explicit planning strategy; Java enforces operational constraints; generative LLMs perform targeted language tasks.
 
-### System 1 — bounded semantic decisions
+### System 1 - Bounded semantic decisions
 
-System 1 evaluates known, typed questions against the current mission state. It does not invent tools, create an execution plan or execute actions.
+Glide or JEV answers typed questions against the current mission state. It does not invent tools, construct executable action sequences or invoke capabilities.
 
-- **Provider:** Glide or Jev.
 - **Intent:** determine required evidence sources, FAST versus RESEARCH execution path and GOAP versus HYBRID planner mode.
-- **Goal review:** evaluate whether the original mission is satisfied, still needs evidence or is blocked/ambiguous.
-- **Utility:** independently score the marginal value of eligible document, internal-search and company-graph actions using typed `NoulQuestion` judgments.
-- **Uncertainty:** intent uses explicit conservative policy fallbacks; missing or low-confidence bounded judgments are **not** reclassified by a generative LLM. Required, authorized evidence sources retain a deterministic minimum utility floor.
+- **Goal review:** assess whether the original mission is satisfied, needs further evidence or is blocked/ambiguous.
+- **Utility estimation:** independently assess the marginal value of eligible document, internal-search and company-graph capabilities through typed `NoulQuestion` judgments.
+- **Uncertainty:** conservative policy fallbacks handle uncertain intent. Missing or low-confidence bounded judgments are not reclassified by a generative LLM. Required, authorized evidence sources retain a deterministic minimum utility floor.
 
-`MissionGoalReviewComponent` prepares scored candidate proposals after Java checks authorization, graph prerequisites and budgets. It uses a shared evidence-action cost of `0.05`, an executable-utility threshold of `0.06` and a required-source utility floor of `0.10`. A single eligible action follows a deterministic path. Only explicitly generative work—such as constructing a new evidence subquery after an earlier query was executed—uses an LLM. The LLM neither chooses execution actions nor certifies the result.
+`MissionGoalReviewComponent` prepares scored candidate proposals after Java checks authorization, graph prerequisites and budgets. The shared evidence-action cost is `0.05`, the executable-utility threshold is `0.06`, and the required-source utility floor is `0.10`. A single eligible action follows a deterministic path. These scores estimate action value; they do not authorize tool execution or constitute a multi-step plan.
 
-### System 2 — Goal-directed planning, LLM escalation and evidence review
+### Symbolic planning - Embabel GOAP and HYBRID
 
-Embabel executes registered actions using **GOAP** or **HYBRID** planning, with dynamic action eligibility and utility values derived from the mission's evolving evidence state.
+Embabel selects registered actions according to the configured planning strategy. Both strategies operate over modeled action eligibility and mission state, but optimize different objectives.
 
-**System 1 (JEV/Glide)** evaluates goal satisfaction and estimates the marginal utility of eligible evidence capabilities. **Embabel** uses these assessments to select and execute actions while Java enforces authorization, prerequisites and execution budgets.
+| Planner | Decision mechanism | Optimization objective |
+|---|---|---|
+| **GOAP** (Goal-Oriented Action Planning) | Searches modeled state transitions using action preconditions and effects | Minimize cumulative path cost to a defined goal |
+| **HYBRID** (Utility AI with goal-based termination) | Selects achievable actions by immediate net utility (`value - cost`) and checks goal satisfaction | Maximize immediate action utility while progressing toward a terminal goal |
 
-When the original query has already been attempted but evidence remains insufficient, **generative LLM escalation** can produce a distinct, targeted follow-up subquery for an eligible capability. The LLM refines *what to investigate next*, not *which tool to execute* or *whether the goal is satisfied*.
+System 1 supplies semantic assessments and candidate values. HYBRID uses those values for utility-based selection; GOAP searches for a goal-reaching path rather than directly maximizing the next action's semantic score. Since evidence actions share a fixed cost, their relative HYBRID ranking is determined by their supplied values, subject to eligibility.
 
+GOAP is useful when alternative routes have explicit dependencies, effects and cumulative costs. HYBRID is useful when evidence collection is iterative and the value of the next action changes with new observations. Neither planner infers unmodeled business requirements or verifies factual evidence on its own. The practical benefit of GOAP's lookahead depends on the richness of the registered action model.
+
+**HYBRID configuration note:** Embabel documents a real terminal goal paired with an unsatisfiable exploration goal such as `NIRVANA` for iterative utility-based evidence gathering. Confirm this configuration (or equivalent behavior in the pinned framework version) before claiming multi-step HYBRID exploration. The architecture documentation identifies `FinishState.complete` but does not establish the exploration-goal configuration.
+
+See [Embabel planning strategies](https://hub.embabel.com/reference/planners) for framework semantics.
+
+### Deterministic governance and generative reasoning
+
+Java independently enforces frozen tool and source authorization, action prerequisites, evidence admission and execution budgets. A high semantic score cannot make an unauthorized action executable or waive a mandatory prerequisite.
+
+When an earlier query has already been attempted and more evidence is needed, a generative LLM can construct a distinct follow-up subquery for an eligible capability. Generative models also synthesize answers from admitted evidence. They do not select execution actions, override bounded judgments or certify mission completion.
+
+### Mission execution loop
 
 ```mermaid
 flowchart TD
@@ -87,16 +102,18 @@ flowchart TD
     E --> F[System 1: Review goal and evidence]
     F --> G{Goal status}
 
-    G -->|Needs evidence| H[Score eligible capabilities]
-    H --> I{New subquery needed?}
-    I -->|Yes| J[System 2: Escalate to generative LLM]
-    I -->|No| K[Use original query]
-
-    J --> L[Embabel: GOAP/HYBRID action selection]
-    K --> L
-    L --> M[Execute authorized capability]
-    M --> N[Update evidence and blackboard]
-    N --> F
+    G -->|Needs evidence| H[Java: Check authorization, prerequisites and budgets]
+    H --> I[System 1: Estimate eligible action values]
+    I --> J[Prepare candidate proposals and queries]
+    J -.->|If needed| K[Generative LLM: Refine subquery]
+    K -.-> J
+    J --> L{Configured planner}
+    L -->|GOAP| M[Search modeled goal-directed paths]
+    L -->|HYBRID| N[Rank achievable actions by net utility]
+    M --> S[Execute selected authorized capability]
+    N --> S
+    S --> T[Admit evidence and update blackboard]
+    T --> F
 
     G -->|Satisfied or ready| O[Grounded synthesis and validation]
     G -->|Blocked or ambiguous| P[Unresolved outcome]
@@ -108,8 +125,7 @@ flowchart TD
     R -.-> D
 ```
 
-The execution loop continues until the goal is satisfied, evidence is exhausted, or an execution constraint prevents further progress. **Generative escalation never overrides System 1's bounded judgments, Embabel's action selection, or deterministic governance rules.**
-
+The execution loop continues until the goal is satisfied, evidence is exhausted or execution constraints prevent further progress. Semantic judgments inform execution, but modeled planning rules and deterministic governance remain independent of model predictions. A terminal outcome does not by itself establish that every requested fact was verified; unresolved gaps remain explicit.
 
 Read [Agent decisions](docs/architecture/agent-decisions.md) for confidence, utility, GOAP/HYBRID and review semantics.
 

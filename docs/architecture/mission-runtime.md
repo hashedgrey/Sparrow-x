@@ -20,6 +20,19 @@ A repeated request with the same fingerprint reuses the existing mission. Both F
 
 Embabel runs on a virtual thread so the activity can poll for Temporal cancellation. Graph batch operations use a shared gRPC deadline; cancellation and authorization failures are distinguished from recoverable transport/evidence shortfalls. A required human approval is converted into an `APPROVAL_REQUIRED` activity result; the workflow manages approval, rejection or expiration. Successful terminalization occurs only after the agent produces a mission result and the result checkpoint is available.
 
+## Planning and execution boundaries
+
+The frozen intent selects the planning mode for the mission; the planner operates against the evolving evidence state. The runtime separates four responsibilities:
+
+| Component | Responsibility |
+|---|---|
+| System 1 (JEV/Glide) | Assess goal status and estimate marginal utility of eligible evidence capabilities |
+| Java policies | Enforce frozen grants, graph prerequisites, source requirements, budgets and evidence admission |
+| Embabel | Select registered actions via GOAP path search or HYBRID utility-based planning |
+| Generative LLM | Prepare distinct follow-up queries and synthesize grounded responses; no execution-selection or certification authority |
+
+Temporal owns durable orchestration, not action selection. During the Embabel reason/execute loop, new observations are incorporated into the blackboard and the original goal is reviewed again. Candidate scores are not a fixed execution sequence. For planner semantics and the HYBRID exploration-goal configuration check, see [Agent decision architecture](agent-decisions.md).
+
 ## State ownership
 
 | Data | Owner |
@@ -44,4 +57,4 @@ Embabel runs on a virtual thread so the activity can poll for Temporal cancellat
 - Distinguish `COMPLETED`, failure, cancellation and waiting-for-approval outcomes.
 - Keep streamed event chronology aligned with persisted mission records, distinguishing utility proposals, Embabel action selection, capability attempts and final goal outcome.
 
-The backend does not require a fixed number of steps. The final trace may contain repeated action kinds as new evidence changes what should happen next.
+The backend does not require a fixed number of steps. The final trace may contain repeated action kinds as new evidence changes what should happen next. A terminal workflow result is not synonymous with certified fulfillment of the original goal: unresolved or partial results must preserve that distinction.
