@@ -1,21 +1,15 @@
 package com.sparrowx.agentic.components;
 
-import com.sparrowx.agentic.decision.LlmDecisionEngine;
 import com.sparrowx.agentic.decision.SemanticDecisionService;
 import com.sparrowx.agentic.planning.MissionCapabilities;
 import com.sparrowx.agentic.trace.MissionDecisionTraceContext;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceAnswer;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceQuestion;
-import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionQuestion;
-import com.sparrowx.agentic.systemone.SystemOneDecisionClient.NoulQuestion;
-import com.sparrowx.agentic.systemone.SystemOneDecisionClient.NoulAnswer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,10 +17,11 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * JEV evaluates mission status and the marginal utility of eligible evidence
- * capabilities; Embabel chooses the next executable action using those values.
- * Java enforces authorization, graph prerequisites and evidence budgets.
- * The generative LLM only creates distinct follow-up subqueries.
+ * JEV evaluates semantic goal status and evidence sufficiency, but never
+ * selects or excludes candidate actions. MissionActionPolicy independently
+ * owns eligibility and blends optional bounded JEV marginal-value signals
+ * with deterministic utility. Queries are generated only for the selected action.
+ * Java retains authoritative evidence and budget guards.
  */
 @Component
 public final class MissionGoalReviewComponent {
@@ -35,22 +30,13 @@ public final class MissionGoalReviewComponent {
     public static final String SEARCH = MissionCapabilities.INTERNAL_SEARCH;
     public static final String GRAPH = MissionCapabilities.COMPANY_GRAPH;
     public static final String NONE = MissionCapabilities.NONE;
-    private static final Set<String> CAPABILITIES = Set.of(DOCUMENT, SEARCH, GRAPH);
     public static final double EVIDENCE_ACTION_COST = 0.05d;
-    private static final double MIN_EXECUTABLE_UTILITY = 0.06d;
-    private static final Comparator<Proposal> PREVIEW_ORDER =
-            Comparator.comparingDouble(Proposal::netUtility).reversed().thenComparing(Proposal::action);
-    // A mandatory source may not be discarded merely because JEV abstained
-    // or under-ranked it; source necessity is frozen by MissionIntent.
-    private static final double REQUIRED_SOURCE_UTILITY_FLOOR = 0.10d;
 
     private final SemanticDecisionService semantic;
     private final int maxEvidenceActions;
     private final int maxCallsPerCapability;
     @Value("${sparrowx.mission.reasoning.status-confidence:0.80}")
     private double statusConfidence = 0.80d;
-    @Value("${sparrowx.mission.reasoning.action-confidence:0.80}")
-    private double actionConfidence = 0.80d;
     @Value("${sparrowx.mission.reasoning.graph-coverage-confidence:0.90}")
     private double graphCoverageConfidence = 0.90d;
 
@@ -76,7 +62,7 @@ public final class MissionGoalReviewComponent {
 
     private Decision reviewInternal(Request request) {
         Objects.requireNonNull(request, "request");
-        for (double value : new double[]{statusConfidence, actionConfidence, graphCoverageConfidence}) {
+        for (double value : new double[]{statusConfidence, graphCoverageConfidence}) {
             if (!Double.isFinite(value) || value < 0 || value > 1) {
                 throw new IllegalStateException("Invalid JEV confidence threshold");
             }
@@ -88,19 +74,14 @@ public final class MissionGoalReviewComponent {
         if (fast != null) return fast;
 
         Set<String> eligible = eligible(request);
-        // A single mandatory graph prerequisite is not a semantic choice.
-        // GOAP still executes the authorized action, and JEV independently
-        // evaluates verified evidence after the graph query completes.
+        // Deterministic mandatory-evidence guard avoids a needless JEV call
+        // when only one required prerequisite is available. It does not choose
+        // which tool Embabel should execute.
         Decision mandatory = tryMandatoryEvidencePrerequisite(request, eligible);
         if (mandatory != null) return mandatory;
-        // If an exhaustive scan supplied roots but the graph compiler reports
-        // an ambiguity, another graph call with unchanged roots is not a repair.
-        // Allow a distinct corrective root-discovery query first.
-        Decision corrective = tryCorrectiveRootDiscovery(request, eligible);
-        if (corrective != null) return corrective;
 
-        // JEV is authoritative for bounded status and capability decisions.
-        // No structured LLM call is made merely to select a next action.
+        // JEV is authoritative for bounded GOAL STATUS, not action selection.
+        // Action scoring and query generation are performed elsewhere.
         Map<String, Object> input = new LinkedHashMap<>();
         input.put("originalMission", request.objective());
         input.put("latestCapability", request.latestCapability());
@@ -192,7 +173,11 @@ public final class MissionGoalReviewComponent {
             status = Status.BLOCKED;
         }
         if (status == Status.NEEDS_EVIDENCE) {
-            return proposeEvidence(request, input, eligible);
+            return eligible.isEmpty()
+                    ? new Decision(Status.BLOCKED, NONE, "",
+                            "No permitted evidence action remains within budget", List.of())
+                    : new Decision(Status.NEEDS_EVIDENCE, NONE, "",
+                            "JEV finds remaining research necessary; Embabel decides the action", List.of());
         }
 
         String reason = "JEV reviewed mission evidence: " + status.name();
@@ -233,74 +218,6 @@ public final class MissionGoalReviewComponent {
             reason = "Cannot certify exhaustive reasoning from a shortened result set: " + reason;
         }
         return new Decision(status, NONE, "", reason, List.of());
-    }
-
-    private Decision proposeEvidence(Request request, Map<String, Object> reviewState, Set<String> eligible) {
-        if (eligible.isEmpty()) {
-            return new Decision(Status.BLOCKED, NONE, "",
-                    "No authorized evidence action remains", List.of());
-        }
-
-        Set<String> required = unmetMandatoryCapabilities(request, eligible);
-        List<String> choices = (required.isEmpty() ? eligible : required).stream().sorted().toList();
-        Map<String, Double> values = scoreEligibleCapabilities(request, reviewState, choices, required);
-        List<Proposal> candidates = new ArrayList<>();
-        for (String action : choices) {
-            double value = values.getOrDefault(action, 0.0d);
-            if (value < MIN_EXECUTABLE_UTILITY || value <= EVIDENCE_ACTION_COST) continue;
-            String query = candidateQuery(request, reviewState, action);
-            if (query.isBlank()) continue;
-
-            candidates.add(new Proposal(action, query, value));
-            MissionDecisionTraceContext.event("MISSION_ACTION_UTILITY", "Eligible action scored",
-                    Map.of("capability", action,
-                            "utility", Double.toString(value),
-                            "sourceRequired", Boolean.toString(required.contains(action)),
-                            "actionCost", Double.toString(EVIDENCE_ACTION_COST)));
-        }
-
-        // The UI preview needs one candidate. Embabel receives every proposal.
-        var preview = candidates.stream().min(PREVIEW_ORDER);
-        if (preview.isEmpty()) {
-            return new Decision(Status.BLOCKED, NONE, "",
-                    "No authorized evidence action met the utility and query requirements", List.of());
-        }
-        Proposal best = preview.get();
-        return new Decision(Status.NEEDS_EVIDENCE, best.action(), best.query(),
-                "Eligible evidence actions scored for Embabel selection", List.of(), candidates);
-    }
-
-    private String candidateQuery(Request request, Map<String, Object> reviewState, String action) {
-        String objective = request.objective();
-        boolean previouslyAttempted = request.observations().stream().anyMatch(o ->
-                action.equals(o.get("action")) && queryEquals(objective, Objects.toString(o.get("query"), "")));
-        if (!previouslyAttempted) return objective;
-
-        // A failed invocation may retry the same query once. An executed query
-        // needs a distinct evidence focus before the capability can run again.
-        int failures = failedOnlyAttempts(request.observations(), action, objective);
-        if (failures >= 2) {
-            LOG.warn("mission.goal-review.failed-capability-exhausted missionId={} capability={} attempts={}",
-                    request.missionId(), action, failures);
-            return "";
-        }
-        if (failures == 1) {
-            LOG.info("mission.goal-review.retry-failed-capability missionId={} capability={} attempt=2",
-                    request.missionId(), action);
-            return objective;
-        }
-
-        String query;
-        try {
-            query = generateFollowUpQuery(request, reviewState, action);
-        } catch (RuntimeException exception) {
-            LOG.warn("mission.goal-review.subquery-unavailable missionId={} capability={} error={}",
-                    request.missionId(), action, exception.getClass().getSimpleName());
-            return "";
-        }
-        boolean repeated = request.observations().stream().anyMatch(o ->
-                action.equals(o.get("action")) && queryEquals(query, Objects.toString(o.get("query"), "")));
-        return repeated ? "" : query;
     }
 
     /**
@@ -395,92 +312,11 @@ public final class MissionGoalReviewComponent {
         return Set.copyOf(unmet);
     }
 
-    /**
-     * Score marginal relevance independently for each eligible capability.
-     */
-    private Map<String, Double> scoreEligibleCapabilities(Request request, Map<String, Object> reviewState,
-                                                         List<String> choices, Set<String> required) {
-        if (choices.size() == 1) {
-            // No competition exists: keep the original deterministic unique
-            // action policy, including the mandatory-prerequisite path.
-            return Map.of(choices.getFirst(), 1.0d);
-        }
-        Map<String, DecisionQuestion> questions = new LinkedHashMap<>();
-        for (String action : choices) {
-            String capabilityDescription = switch (action) {
-                case DOCUMENT -> "retrieving additional document passages and verified source references";
-                case SEARCH -> "identifying internal enterprise entities and graph roots";
-                case GRAPH -> "querying verified relationships for previously resolved graph roots";
-                default -> throw new IllegalArgumentException("Unknown evidence capability");
-            };
-            questions.put(action, new NoulQuestion(
-                    "Given the ORIGINAL mission, all observations, and outstanding facts, how likely is "
-                            + capabilityDescription + " to provide NEW necessary evidence now? "
-                            + "Rate marginal value independently of the other available capabilities. "
-                            + "A successful past call alone does not imply the missing facts are resolved.",
-                    "This permitted capability can advance an uncovered goal requirement",
-                    "This capability would be irrelevant or redundant at this state"));
-        }
-        Map<String, Double> scores = new LinkedHashMap<>();
-        var answers = semantic.tryIndependentBounded(reviewState, questions,
-                actionConfidence, request.operationId() + ":action-utilities");
-        for (String action : choices) {
-            if (answers.get(action) instanceof NoulAnswer answer) {
-                scores.put(action, answer.probability());
-            }
-        }
-        // Keep required source work available after a low score or abstention.
-        for (String action : required) {
-            scores.merge(action, REQUIRED_SOURCE_UTILITY_FLOOR, Math::max);
-        }
-        return Map.copyOf(scores);
-    }
-
-    private static boolean queryEquals(String left, String right) {
-        return left.trim().equalsIgnoreCase(right.trim());
-    }
-
-    /**
-     * Counts repeated failed invocations of the same capability/query ONLY if
-     * none reached the backend successfully. Returns zero if any matching
-     * invocation completed (even with an empty result), which permits a
-     * genuinely new evidence subquery instead of an identical retry.
-     */
+    // Retained for package-level compatibility with existing retry-policy tests.
+    @Deprecated
     static int failedOnlyAttempts(List<Map<String, Object>> observations,
                                   String capability, String query) {
-        int failures = 0;
-        for (Map<String, Object> observation : observations) {
-            if (!capability.equals(observation.get("action"))
-                    || !queryEquals(query, Objects.toString(observation.get("query"), "")))
-                continue;
-            if (!(observation.get("attributes") instanceof Map<?, ?> attributes)
-                    || !Boolean.TRUE.equals(attributes.get("executionFailed")))
-                return 0;
-            failures++;
-        }
-        return failures;
-    }
-
-    /** Generate a query only for an eligible candidate needing a new evidence focus. */
-    private String generateFollowUpQuery(Request request, Map<String, Object> reviewState,
-                                         String authorizedCapability) {
-        Map<String, Object> input = new LinkedHashMap<>(reviewState);
-        input.put("authorizedCapability", authorizedCapability);
-        LOG.info("mission.goal-review.subquery-generation.start missionId={} capability={}",
-                request.missionId(), authorizedCapability);
-        var generated = semantic.escalate(new LlmDecisionEngine.Request(
-                request.missionId(), request.operationId() + ":subquery-generation:" + authorizedCapability,
-                request.operationId() + ":subquery-generation:" + authorizedCapability,
-                "Generate one NEW evidence subquery for the authorized candidate capability. "
-                        + "Preserve the original mission and all constraints. The query must advance "
-                        + "an unresolved fact, must not repeat a previous query, and must never "
-                        + "change the authorized capability. Do not decide goal satisfaction.",
-                Map.copyOf(input), Set.of("nextQuery"),
-                Map.of("type", "object", "properties", Map.of("nextQuery", Map.of("type", "string")),
-                        "required", List.of("nextQuery"), "additionalProperties", false),
-                650, 0.0d, Map.of("component", "goal-review-query-generation")));
-        Object value = generated.output() == null ? null : generated.output().get("nextQuery");
-        return value instanceof String text ? text.trim() : "";
+        return MissionActionPolicy.failedOnlyAttempts(observations, capability, query);
     }
 
     /**
@@ -498,47 +334,8 @@ public final class MissionGoalReviewComponent {
         if (mandatory.size() != 1) return null;
         String action = mandatory.iterator().next();
         if (request.attempts().getOrDefault(action, 0) > 0) return null;
-        return new Decision(Status.NEEDS_EVIDENCE, action, request.objective(),
-                "Execute the only remaining mandatory evidence prerequisite", List.of());
-    }
-
-    private Decision tryCorrectiveRootDiscovery(Request request, Set<String> eligible) {
-        if (!request.requiresCompanyGraph() || !eligible.contains(SEARCH)
-                || request.attempts().getOrDefault(GRAPH, 0) < 1
-                || request.attempts().getOrDefault(SEARCH, 0) != 1) return null;
-        Map<String, Object> latestSearch = null;
-        Map<String, Object> latestGraph = null;
-        for (Map<String, Object> observation : request.observations()) {
-            if (SEARCH.equals(observation.get("action"))) latestSearch = observation;
-            if (GRAPH.equals(observation.get("action"))) latestGraph = observation;
-        }
-        if (latestSearch == null || latestGraph == null) return null;
-        if (!(latestSearch.get("attributes") instanceof Map<?, ?> sa)
-                || !(latestGraph.get("attributes") instanceof Map<?, ?> ga)) return null;
-        String mode = Objects.toString(sa.get("rootSelectionMode"), "");
-        String status = Objects.toString(ga.get("graphResolutionStatus"), "");
-        if (!("TYPE_SCAN".equals(mode) || "MULTI_TYPE_SCAN".equals(mode))
-                || !"AMBIGUOUS".equals(status)) return null;
-        Map<String, Object> context = new LinkedHashMap<>();
-        context.put("originalMission", request.objective());
-        context.put("observations", request.observations());
-        context.put("correctiveObjective", "Resolve literal named constraints before another graph query");
-        String generated = generateFollowUpQuery(request, context, SEARCH);
-        // Preserve the complete frozen objective verbatim in a corrective
-        // request: generated subquestions must not delete named constraints.
-        final String subquery = generated.isBlank() ? "" :
-                (generated.contains(request.objective()) ? generated
-                        : request.objective() + "\nCorrective evidence focus: " + generated);
-        if (subquery.isBlank() || request.observations().stream().anyMatch(o ->
-                SEARCH.equals(o.get("action"))
-                        && queryEquals(subquery, Objects.toString(o.get("query"), ""))))
-            return new Decision(Status.BLOCKED, NONE, "",
-                    "No distinct corrective root query was generated", List.of());
-        MissionDecisionTraceContext.event("ROOT_SCOPE_CORRECTION",
-                "Retry internal entity selection after ambiguous graph scope",
-                Map.of("priorRootMode", mode, "graphResolutionStatus", status));
-        return new Decision(Status.NEEDS_EVIDENCE, SEARCH, subquery,
-                "Re-resolve named graph constraints before repeating graph construction", List.of());
+        return new Decision(Status.NEEDS_EVIDENCE, NONE, "",
+                "A mandatory evidence source remains unattempted; planner chooses the action", List.of());
     }
 
     private static boolean hasCompleteGraphObservation(List<Map<String, Object>> observations) {
@@ -558,38 +355,7 @@ public final class MissionGoalReviewComponent {
      * the eligible actions, and may replan after every observation.
      */
     private Set<String> eligible(Request request) {
-        int total = request.attempts().values().stream().mapToInt(Integer::intValue).sum();
-        if (total >= maxEvidenceActions) return Set.of();
-        // Empty internal roots preclude dependent graph traversal, not an
-        // independent mandatory document lookup or report of what was absent.
-
-        boolean graphRequired = request.requiresCompanyGraph();
-        boolean rootsReady = hasUsableGraphRoots(request.observations());
-        boolean graphAttempted = request.attempts().getOrDefault(GRAPH, 0) > 0;
-        boolean completeGraph = hasCompleteGraphObservation(request.observations());
-        Set<String> allowed = new java.util.LinkedHashSet<>();
-        for (String capability : CAPABILITIES) {
-            if (!MissionCapabilities.allows(request.allowedTools(), capability)) continue;
-            if (request.attempts().getOrDefault(capability, 0) >= maxCallsPerCapability) continue;
-            if (GRAPH.equals(capability) && (!rootsReady || hasExhaustiveEmptyRoots(request.observations()))) continue;
-            if (SEARCH.equals(capability) && !request.requiresInternalContext()) continue;
-            if (GRAPH.equals(capability) && !request.requiresCompanyGraph()) continue;
-            if (DOCUMENT.equals(capability) && !request.requiresDocumentEvidence()) continue;
-
-            // Reuse already resolved roots for the first graph execution.
-            // After observing graph output, the agent is free to re-resolve
-            // if the result reveals that the original root scope was wrong.
-            if (SEARCH.equals(capability) && graphRequired && rootsReady
-                    && (!graphAttempted || completeGraph))
-                continue;
-
-            // Source necessity is frozen in MissionIntent. Tool authorization
-            // alone never makes an otherwise irrelevant capability eligible.
-            // Don't repeat initial root discovery on an unresolved graph mission
-            // when authoritative roots are already known.
-            allowed.add(capability);
-        }
-        return Set.copyOf(allowed);
+        return MissionActionPolicy.eligible(request, maxEvidenceActions, maxCallsPerCapability);
     }
 
     /**
@@ -733,6 +499,8 @@ public final class MissionGoalReviewComponent {
     }
     public enum Status { SATISFIED, READY_FOR_SYNTHESIS, NEEDS_EVIDENCE, AMBIGUOUS, BLOCKED }
 
+    /** Legacy scored-proposal representation for existing serialized traces/callers; no longer emitted. */
+    @Deprecated
     public record Proposal(String action, String query, double utility) {
         public Proposal {
             action = text(action, "action");
@@ -746,8 +514,8 @@ public final class MissionGoalReviewComponent {
         }
     }
 
-    // `alternatives` contains all scored candidates in capability order.
-    // The legacy field name and nextAction/nextQuery preview remain part of the decision contract.
+    // Legacy decision shape is retained for compatibility, but status reviews now
+    // return NONE / empty query / empty alternatives on NEEDS_EVIDENCE.
     public record Decision(Status status, String nextAction, String nextQuery,
                            String reason, List<String> missingFacts, List<Proposal> alternatives) {
         public Decision {
@@ -766,14 +534,15 @@ public final class MissionGoalReviewComponent {
                         String reason, List<String> missingFacts) {
             this(status, nextAction, nextQuery, reason, missingFacts, List.of());
         }
+        @Deprecated
         public java.util.Optional<Proposal> proposalFor(String action) {
             if (status != Status.NEEDS_EVIDENCE) return java.util.Optional.empty();
             // For scored reviews, these are the complete candidate proposals.
             java.util.Optional<Proposal> scored = alternatives.stream()
                     .filter(p -> p.action().equals(action)).findFirst();
             if (scored.isPresent()) return scored;
-            // Compatibility with prerequisite/corrective reviews, which
-            // deliberately bypass semantic scoring for a single action.
+            // Legacy fallback for older persisted reviews. The current
+            // status-only reviewer does not populate nextAction.
             if (alternatives.isEmpty() && nextAction.equals(action))
                 return java.util.Optional.of(new Proposal(action, nextQuery, 1.0d));
             return java.util.Optional.empty();

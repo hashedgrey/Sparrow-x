@@ -11,6 +11,8 @@ import com.embabel.agent.api.annotation.Provided;
 import com.embabel.agent.api.annotation.State;
 import com.embabel.agent.api.common.OperationContext;
 import com.embabel.agent.api.common.PlannerType;
+import com.sparrowx.agentic.components.MissionActionPolicy;
+import com.sparrowx.agentic.components.MissionActionPolicy.ActionPlan;
 import com.sparrowx.agentic.components.MissionGoalReviewComponent;
 import com.sparrowx.agentic.components.MissionGoalReviewComponent.Decision;
 import com.sparrowx.agentic.components.MissionGoalReviewComponent.Status;
@@ -32,9 +34,11 @@ import org.slf4j.LoggerFactory;
 
 /**
  * GOAP/HYBRID share the same evidence-driven Embabel state machine.
- * JEV evaluates bounded goal status and per-capability marginal value;
- * Embabel selects among eligible scored evidence actions. A generative model
- * produces distinct follow-up queries only when the original was attempted.
+ * JEV evaluates bounded goal status, independent of tool selection.
+ * Embabel chooses among authorized, prerequisite-satisfied actions using
+ * blended JEV marginal relevance and structural utility from MissionActionPolicy.
+ * JEV cannot prune the authorized candidate set. An LLM generates
+ * distinct follow-up queries only AFTER Embabel has selected an action.
  * The next state reevaluates the original mission goal.
  * Only the terminal state exposes @AchievesGoal. No query-specific Java workflow.
  */
@@ -48,6 +52,19 @@ public final class MissionAgent {
     private static final Logger LOG = LoggerFactory.getLogger(MissionAgent.class);
     // A review projection budget, not a limit on persisted evidence or synthesis input.
     private static final int MAX_GRAPH_ROWS_PER_REVIEW = 100;
+
+    /**
+     * Frozen mission requirements and authorization are independent of the
+     * goal reviewer's semantic status. Only frozen intent and pure action
+     * policy can make a capability executable.
+     */
+    private static boolean requiredAndAuthorized(MissionRunInput input, String capability) {
+        if (input == null || !MissionCapabilities.allows(input.intent(), capability)) return false;
+        if (DOCUMENT.equals(capability)) return input.intent().requiresDocumentEvidence();
+        if (SEARCH.equals(capability)) return input.intent().requiresInternalContext();
+        if (GRAPH.equals(capability)) return input.intent().requiresCompanyGraph();
+        return false;
+    }
 
     public static final String DOCUMENT = MissionCapabilities.DOCUMENT_EVIDENCE;
     public static final String SEARCH = MissionCapabilities.INTERNAL_SEARCH;
@@ -78,7 +95,7 @@ public final class MissionAgent {
      * Embabel 1.5.2 ignores value/valueMethod for actions declared inside
      * @State. Register the evidence actions on the @Agent so their dynamic
      * utility is available to HYBRID, while the state objects continue to
-     * hold the current proposal, evidence and execution implementation.
+     * hold the current action plan, evidence and execution implementation.
      *
      * @Cost is evaluated during planning, not during action execution. It
      * must be side-effect free, null-safe and must not invoke Jev/the LLM.
@@ -100,10 +117,8 @@ public final class MissionAgent {
     }
 
     private static double proposalValue(ExecuteState state, String capability) {
-        if (state == null) return 0.0;
-        return state.decision().proposalFor(capability)
-                .map(MissionGoalReviewComponent.Proposal::utility)
-                .orElse(0.0);
+        if (state == null || !state.eligibleFor(capability)) return 0.0;
+        return state.plan().utility(capability);
     }
 
     @Action(pre = "missionDocumentRecommended", canRerun = true, clearBlackboard = true,
@@ -112,9 +127,10 @@ public final class MissionAgent {
     public ReasonState retrieveDocuments(ExecuteState state,
                                          @Provided MissionEvidenceActions capabilities,
                                          @Provided MissionTracePublisher tracePublisher,
+                                         @Provided MissionActionPolicy actionPolicy,
                                          OperationContext context) {
         return Objects.requireNonNull(state, "ExecuteState required")
-                .retrieveDocuments(capabilities, tracePublisher, context);
+                .retrieveDocuments(capabilities, tracePublisher, actionPolicy, context);
     }
 
     @Action(pre = "missionSearchRecommended", canRerun = true, clearBlackboard = true,
@@ -123,9 +139,10 @@ public final class MissionAgent {
     public ReasonState searchEntities(ExecuteState state,
                                       @Provided MissionEvidenceActions capabilities,
                                       @Provided MissionTracePublisher tracePublisher,
+                                      @Provided MissionActionPolicy actionPolicy,
                                       OperationContext context) {
         return Objects.requireNonNull(state, "ExecuteState required")
-                .searchEntities(capabilities, tracePublisher, context);
+                .searchEntities(capabilities, tracePublisher, actionPolicy, context);
     }
 
     @Action(pre = "missionGraphRecommended", canRerun = true, clearBlackboard = true,
@@ -134,9 +151,10 @@ public final class MissionAgent {
     public ReasonState queryGraph(ExecuteState state,
                                   @Provided MissionEvidenceActions capabilities,
                                   @Provided MissionTracePublisher tracePublisher,
+                                  @Provided MissionActionPolicy actionPolicy,
                                   OperationContext context) {
         return Objects.requireNonNull(state, "ExecuteState required")
-                .queryGraph(capabilities, tracePublisher, context);
+                .queryGraph(capabilities, tracePublisher, actionPolicy, context);
     }
 
     @Action(value = 1.0, description = "Start a mission with an empty evidence ledger")
@@ -168,8 +186,9 @@ public final class MissionAgent {
         }
 
         @Action(canRerun = true, clearBlackboard = true,
-                description = "Reason over observations and recommend the next authorized action")
+                description = "Review goal sufficiency and prepare an independent Embabel action pool")
         public Stage reason(@Provided MissionGoalReviewComponent reviewer,
+                            @Provided MissionActionPolicy actionPolicy,
                             @Provided MissionTracePublisher tracePublisher) {
             try (var scope = MissionDecisionTraceContext.open(input, tracePublisher)) {
                 var loop = MissionDecisionTraceContext.begin("REASON_LOOP",
@@ -180,24 +199,37 @@ public final class MissionAgent {
                     MissionDecisionTraceContext.snapshot("Mission evidence before review", progress.observations().size(),
                             progress.evidence().size(), progress.evidence().stream().mapToInt(e -> e.evidenceRefs().size()).sum(),
                             progress.attempts().values().stream().mapToInt(Integer::intValue).sum(), 0, 0);
-                    Decision decision = reviewer.review(new MissionGoalReviewComponent.Request(
+                    // Review sees only tool grants with matching authorized sources.
+                    Set<String> grantedCapabilities = java.util.stream.Stream.of(DOCUMENT, SEARCH, GRAPH)
+                            .filter(capability -> MissionCapabilities.allows(input.intent(), capability))
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet());
+                    MissionGoalReviewComponent.Request reviewRequest = new MissionGoalReviewComponent.Request(
                             input.missionId(),
                             input.request().context().requestId() + ":goal-review:" + progress.observations().size(),
                             input.request().query(),
                             progress.observations().isEmpty() ? "START" :
                                     Objects.toString(progress.observations().getLast().get("action"), "START"),
-                            progress.observations(), progress.attempts(), input.intent().allowedTools(),
+                            progress.observations(), progress.attempts(), grantedCapabilities,
                             input.intent().requiresRetrieval(), input.intent().requiresCompanyGraph(),
                             input.intent().requiresDocumentEvidence(), input.intent().requiresInternalContext(),
-                            input.intent().requiresVerification(), input.intent().requiresHumanReview()));
-                    MissionDecisionTraceContext.event("MISSION_ACTION_RECOMMENDATION", "Mission reviewer prepared candidates",
+                            input.intent().requiresVerification(), input.intent().requiresHumanReview());
+                    Decision decision = reviewer.review(reviewRequest);
+                    ActionPlan plan = decision.status() == Status.NEEDS_EVIDENCE
+                            ? actionPolicy.plan(input.intent(), reviewRequest, progress.latestRoots() != null)
+                            : ActionPlan.empty();
+                    // A stale or impossible reviewer continuation must not get
+                    // the process STUCK; finish truthfully when no action exists.
+                    if (decision.status() == Status.NEEDS_EVIDENCE && plan.size() == 0) {
+                        decision = new Decision(Status.BLOCKED, MissionCapabilities.NONE, "",
+                                "No authorized, executable action remains within evidence policy", decision.missingFacts());
+                    }
+                    MissionDecisionTraceContext.event("MISSION_ACTION_RECOMMENDATION", "Embabel candidate pool prepared",
                             Map.of("goalStatus", decision.status().name(),
-                                    "nextAction", decision.nextAction(), // highest-ranked preview, not the selected action
-                                    "candidateCount", Integer.toString(decision.alternatives().isEmpty()
-                                            && decision.status() == Status.NEEDS_EVIDENCE ? 1
-                                            : decision.alternatives().size()),
-                                    "alternativeCount", Integer.toString(Math.max(0, decision.alternatives().size() - 1)),
+                                    "nextAction", MissionCapabilities.NONE,
+                                    "candidateCount", Integer.toString(plan.size()),
+                                    "alternativeCount", Integer.toString(Math.max(0, plan.size() - 1)),
                                     "selectionAuthority", "EMBABEL",
+                                    "scoringAuthority", "MISSION_ACTION_POLICY_OPTIONAL_JEV",
                                     "goal", "FinishState.complete"));
                     // These are outcome events for the actual terminal Embabel goal,
                     // distinct from its recommended next evidence capability.
@@ -211,7 +243,7 @@ public final class MissionAgent {
                                             .mapToInt(Integer::intValue).sum())));
                     if (loop != null) loop.finish("SUCCEEDED", "");
                     return decision.status() == Status.NEEDS_EVIDENCE
-                            ? new ExecuteState(input, progress, decision)
+                            ? new ExecuteState(input, progress, decision, plan)
                             : new FinishState(input, progress, decision);
                 } catch (RuntimeException | Error e) {
                     if (loop != null) loop.finish("FAILED", e.getClass().getSimpleName());
@@ -222,69 +254,104 @@ public final class MissionAgent {
         }
     }
 
-    /** Embabel selects one of the reviewer's scored, authorized candidates. */
-    public record ExecuteState(MissionRunInput input, Progress progress, Decision decision)
+    /** Embabel selects among independently computed authorized action utilities. */
+    public record ExecuteState(MissionRunInput input, Progress progress, Decision decision, ActionPlan plan)
             implements Stage {
         public ExecuteState {
-            Objects.requireNonNull(input); Objects.requireNonNull(progress); Objects.requireNonNull(decision);
-            if (decision.status() != Status.NEEDS_EVIDENCE)
-                throw new IllegalArgumentException("Only evidence-request decisions can execute tools");
+            Objects.requireNonNull(input); Objects.requireNonNull(progress);
+            Objects.requireNonNull(decision); Objects.requireNonNull(plan);
+            if (decision.status() != Status.NEEDS_EVIDENCE || plan.size() == 0)
+                throw new IllegalArgumentException("Only nonempty evidence plans can execute tools");
         }
 
-        // These are plain state predicates. The @Agent-level @Condition
-        // methods above expose them to Embabel's GOAP world-state determiner.
+        // Neither JEV recommendations nor LLM-generated text can grant capabilities.
+        private boolean eligibleFor(String capability) {
+            return requiredAndAuthorized(input, capability)
+                    && plan.eligible(capability)
+                    && (!GRAPH.equals(capability) || progress.latestRoots() != null);
+        }
+
+        // These state predicates are published through the agent-level
+        // @Condition methods for Embabel's world-state determiner.
         public boolean documentRecommended() {
-            return decision.proposalFor(DOCUMENT).isPresent();
+            return eligibleFor(DOCUMENT);
         }
 
         public boolean searchRecommended() {
-            return decision.proposalFor(SEARCH).isPresent();
+            return eligibleFor(SEARCH);
         }
 
         public boolean graphRecommended() {
-            return decision.proposalFor(GRAPH).isPresent() && progress.latestRoots() != null;
+            return eligibleFor(GRAPH);
         }
 
         public ReasonState retrieveDocuments(@Provided MissionEvidenceActions capabilities,
                                              @Provided MissionTracePublisher tracePublisher,
+                                             @Provided MissionActionPolicy actionPolicy,
                                              OperationContext context) {
             ensureAuthorized(DOCUMENT);
-            return run(DOCUMENT, tracePublisher, () -> capabilities.buildDocumentEvidence(input, context, queryFor(DOCUMENT)));
+            String query = queryFor(actionPolicy, DOCUMENT);
+            if (query.isBlank()) return unavailableQuery(DOCUMENT, tracePublisher);
+            return run(DOCUMENT, query, tracePublisher,
+                    () -> capabilities.buildDocumentEvidence(input, context, query));
         }
 
         public ReasonState searchEntities(@Provided MissionEvidenceActions capabilities,
                                           @Provided MissionTracePublisher tracePublisher,
+                                          @Provided MissionActionPolicy actionPolicy,
                                           OperationContext context) {
             ensureAuthorized(SEARCH);
-            return run(SEARCH, tracePublisher, () -> capabilities.searchInternalEntities(input, context, queryFor(SEARCH)));
+            String query = queryFor(actionPolicy, SEARCH);
+            if (query.isBlank()) return unavailableQuery(SEARCH, tracePublisher);
+            return run(SEARCH, query, tracePublisher,
+                    () -> capabilities.searchInternalEntities(input, context, query));
         }
 
         public ReasonState queryGraph(@Provided MissionEvidenceActions capabilities,
                                       @Provided MissionTracePublisher tracePublisher,
+                                      @Provided MissionActionPolicy actionPolicy,
                                       OperationContext context) {
             ensureAuthorized(GRAPH);
-            return run(GRAPH, tracePublisher, () -> capabilities.readCompanyGraph(
-                    input, Objects.requireNonNull(progress.latestRoots()), context, queryFor(GRAPH)));
+            String query = queryFor(actionPolicy, GRAPH);
+            if (query.isBlank()) return unavailableQuery(GRAPH, tracePublisher);
+            return run(GRAPH, query, tracePublisher, () -> capabilities.readCompanyGraph(
+                    input, Objects.requireNonNull(progress.latestRoots()), context, query));
         }
 
-        private String queryFor(String action) {
-            return decision.proposalFor(action).orElseThrow().query();
+        private String queryFor(MissionActionPolicy actionPolicy, String capability) {
+            Objects.requireNonNull(actionPolicy, "actionPolicy");
+            return actionPolicy.resolveSelectedQuery(input.missionId(),
+                    input.request().context().requestId() + ":selected-query:" + capability
+                            + ":" + progress.attempts().getOrDefault(capability, 0),
+                    input.request().query(), progress.observations(), capability);
+        }
+
+        private ReasonState unavailableQuery(String action, MissionTracePublisher tracePublisher) {
+            try (var scope = MissionDecisionTraceContext.open(input, tracePublisher)) {
+                MissionDecisionTraceContext.event("MISSION_ACTION_QUERY_UNAVAILABLE",
+                        "No distinct authorized query for selected capability",
+                        Map.of("capability", action, "selectionAuthority", "EMBABEL"));
+                // This consumes a bounded planning attempt but does NOT record
+                // a backend tool invocation or fabricated negative evidence.
+                return new ReasonState(input, progress.withQueryFailure(action, input.request().query()));
+            }
         }
 
         private void ensureAuthorized(String capability) {
-            if (!MissionCapabilities.allows(input.intent(), capability))
-                throw new SecurityException("Tool is not permitted by the mission: " + capability);
+            if (!eligibleFor(capability))
+                throw new SecurityException("Capability not eligible or permitted by mission: " + capability);
         }
 
-        private ReasonState run(String action, MissionTracePublisher tracePublisher,
+        private ReasonState run(String action, String query, MissionTracePublisher tracePublisher,
                                 java.util.function.Supplier<MissionEvidenceActions.EvidenceState> operation) {
             try (var scope = MissionDecisionTraceContext.open(input, tracePublisher)) {
-                var proposal = decision.proposalFor(action).orElseThrow();
+                double value = plan.utility(action);
                 MissionDecisionTraceContext.event("MISSION_ACTION_SELECTED", "Embabel selected eligible capability",
                         Map.of("capability", action,
-                                "utility", Double.toString(proposal.utility()),
+                                "utility", Double.toString(value),
                                 "cost", Double.toString(EVIDENCE_ACTION_COST),
-                                "netUtility", Double.toString(proposal.netUtility())));
+                                "netUtility", Double.toString(value - EVIDENCE_ACTION_COST)));
+
                 var actionSpan = MissionDecisionTraceContext.begin("CAPABILITY_ATTEMPT",
                         "Execute " + action, Map.of("capability", action,
                                 "attempt", Integer.toString(progress.attempts().getOrDefault(action, 0) + 1)));
@@ -295,7 +362,7 @@ public final class MissionAgent {
                             beforeEvidence, progress.evidence().stream().mapToInt(e -> e.evidenceRefs().size()).sum(),
                             progress.attempts().values().stream().mapToInt(Integer::intValue).sum(), 0, 0);
                     MissionEvidenceActions.EvidenceState state = operation.get();
-                    Progress updated = progress.withEvidence(action, queryFor(action), state);
+                    Progress updated = progress.withEvidence(action, query, state);
                     MissionDecisionTraceContext.snapshot("Mission evidence after capability",
                             updated.observations().size(), updated.evidence().size(),
                             updated.evidence().stream().mapToInt(e -> e.evidenceRefs().size()).sum(),
@@ -326,7 +393,7 @@ public final class MissionAgent {
                             input.missionId(), action,
                             progress.attempts().getOrDefault(action, 0) + 1,
                             e.getClass().getName(), e.getMessage(), e);
-                    Progress updated = progress.withError(action, queryFor(action), e.getClass().getSimpleName());
+                    Progress updated = progress.withError(action, query, e.getClass().getSimpleName());
                     MissionDecisionTraceContext.snapshot("Mission evidence after failed capability",
                             updated.observations().size(), updated.evidence().size(),
                             updated.evidence().stream().mapToInt(evidence -> evidence.evidenceRefs().size()).sum(),
@@ -452,6 +519,18 @@ public final class MissionAgent {
             observation.put("evidenceCount", state.evidenceRefs().size());
             observation.put("evidenceIds", state.evidenceRefs().stream().map(EvidenceRef::evidenceId).toList());
             return append(action, history, observation);
+        }
+
+        public Progress withQueryFailure(String action, String originalObjective) {
+            Map<String, Object> observation = new LinkedHashMap<>();
+            observation.put("id", "observation-" + (observations.size() + 1));
+            observation.put("action", action);
+            observation.put("query", originalObjective);
+            observation.put("summary", "No usable distinct query for selected action");
+            observation.put("attributes", Map.of("queryGenerationFailed", true));
+            observation.put("evidenceCount", 0);
+            observation.put("evidenceIds", List.of());
+            return append(action, evidence, observation);
         }
 
         public Progress withError(String action, String query, String errorType) {
