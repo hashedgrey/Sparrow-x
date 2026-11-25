@@ -11,8 +11,7 @@ import com.sparrowx.document.ingestion.embabel.EmbabelRagIngestionAdapter;
 import com.sparrowx.document.ingestion.indexing.DocumentChunkIndexRequest;
 import com.sparrowx.document.ingestion.indexing.DocumentChunkIndexResult;
 import com.sparrowx.document.ingestion.indexing.DocumentChunkIndexer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -20,13 +19,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+@Slf4j
 @Component
 public class IngestionPipeline {
-
-    private static final Logger logger =
-            LoggerFactory.getLogger(
-                    IngestionPipeline.class
-            );
 
     private final DocumentStorage documentStorage;
     private final EmbabelRagIngestionAdapter embabelRagIngestionAdapter;
@@ -41,24 +36,13 @@ public class IngestionPipeline {
             DocumentChunkRepository documentChunkRepository,
             DocumentChunkIndexer documentChunkIndexer
     ) {
-        this.documentStorage =
-                Objects.requireNonNull(
-                        documentStorage,
-                        "documentStorage must not be null"
-                );
-
+        this.documentStorage = Objects.requireNonNull(documentStorage, "documentStorage must not be null");
         this.embabelRagIngestionAdapter =
-                Objects.requireNonNull(
-                        embabelRagIngestionAdapter,
-                        "embabelRagIngestionAdapter must not be null"
-                );
+                Objects.requireNonNull(embabelRagIngestionAdapter,
+                        "embabelRagIngestionAdapter must not be null");
 
         this.diceDocumentEnricher =
-                Objects.requireNonNull(
-                        diceDocumentEnricher,
-                        "diceDocumentEnricher must not be null"
-                );
-
+                Objects.requireNonNull(diceDocumentEnricher, "diceDocumentEnricher must not be null");
         this.documentChunkRepository =
                 Objects.requireNonNull(
                         documentChunkRepository,
@@ -73,21 +57,11 @@ public class IngestionPipeline {
     }
 
     public IngestionPipelineResult execute(
-            IngestionPipelineRequest request
-    ) {
+            IngestionPipelineRequest request) {
         validate(request);
-
-        List<IngestionPipelineStep> completedSteps =
-                new ArrayList<>();
-
-        byte[] content =
-                documentStorage.read(
-                        request.objectKey().value()
-                );
-
-        completedSteps.add(
-                IngestionPipelineStep.READ_OBJECT
-        );
+        List<IngestionPipelineStep> completedSteps = new ArrayList<>();
+        byte[] content = documentStorage.read(request.objectKey().value());
+        completedSteps.add(IngestionPipelineStep.READ_OBJECT);
 
         EmbabelRagIngestionAdapter.EmbabelRagIngestionResult ingestion =
                 embabelRagIngestionAdapter.ingest(
@@ -98,26 +72,14 @@ public class IngestionPipeline {
                         content
                 );
 
-        completedSteps.add(
-                IngestionPipelineStep.EXTRACT_TEXT
-        );
-
-        completedSteps.add(
-                IngestionPipelineStep.CHUNK_TEXT
-        );
-
-        List<DocumentChunkDraft> chunkDrafts =
-                ingestion.chunks();
+        completedSteps.add(IngestionPipelineStep.EXTRACT_TEXT);
+        completedSteps.add(IngestionPipelineStep.CHUNK_TEXT);
+        List<DocumentChunkDraft> chunkDrafts = ingestion.chunks();
 
         List<DocumentChunkEntity> chunkEntities =
                 chunkDrafts.stream()
                         .map(
-                                chunkDraft ->
-                                        toEntity(
-                                                request,
-                                                chunkDraft
-                                        )
-                        )
+                                chunkDraft -> toEntity(request, chunkDraft))
                         .toList();
 
         /*
@@ -127,13 +89,8 @@ public class IngestionPipeline {
          * the ordinary document chunks from being persisted and indexed
          * before enrichment begins.
          */
-        documentChunkRepository.saveAll(
-                chunkEntities
-        );
-
-        completedSteps.add(
-                IngestionPipelineStep.PERSIST_CHUNKS
-        );
+        documentChunkRepository.saveAll(chunkEntities);
+        completedSteps.add(IngestionPipelineStep.PERSIST_CHUNKS);
 
         DocumentChunkIndexResult indexResult =
                 documentChunkIndexer.index(
@@ -147,11 +104,9 @@ public class IngestionPipeline {
                         )
                 );
 
-        completedSteps.add(
-                IngestionPipelineStep.INDEX_CHUNKS
-        );
+        completedSteps.add(IngestionPipelineStep.INDEX_CHUNKS);
 
-        logger.info(
+        log.info(
                 "Core RAG indexing complete documentId={} chunksIndexed={}",
                 request.documentId().value(),
                 indexResult.chunksIndexed()
@@ -176,7 +131,7 @@ public class IngestionPipeline {
                 );
 
         if (diceEnrichment.partial()) {
-            logger.warn(
+            log.warn(
                     "DICE enrichment completed partially "
                             + "documentId={} propositions={} relationships={} "
                             + "successfulChunks={} failedChunks={} totalChunks={}",
@@ -188,7 +143,7 @@ public class IngestionPipeline {
                     diceEnrichment.totalChunkCount()
             );
         } else {
-            logger.info(
+            log.info(
                     "DICE enrichment complete "
                             + "documentId={} propositions={} relationships={}",
                     request.documentId().value(),
@@ -197,12 +152,8 @@ public class IngestionPipeline {
             );
         }
 
-        completedSteps.add(
-                IngestionPipelineStep.COMPLETED
-        );
-
-        String text =
-                ingestion.extractedText();
+        completedSteps.add(IngestionPipelineStep.COMPLETED);
+        String text = ingestion.extractedText();
 
         return new IngestionPipelineResult(
                 request.ingestionJobId(),
@@ -220,60 +171,18 @@ public class IngestionPipeline {
             IngestionPipelineRequest request,
             DocumentChunkDraft chunkDraft
     ) {
-        DocumentChunkEntity entity =
-                new DocumentChunkEntity();
-
-        entity.setChunkId(
-                chunkDraft.chunkId().value()
-        );
-
-        entity.setDocumentId(
-                request.documentId().value()
-        );
-
-        entity.setTenantId(
-                request.tenantId().value()
-        );
-
-        entity.setProjectId(
-                request.projectId() == null
-                        ? null
-                        : request.projectId().value()
-        );
-
-        entity.setTeamId(
-                request.teamId() == null
-                        ? null
-                        : request.teamId().value()
-        );
-
-        entity.setText(
-                chunkDraft.text()
-        );
-
-        entity.setContentHash(
-                ContentHash
-                        .sha256(
-                                chunkDraft.text()
-                        )
-                        .value()
-        );
-
-        entity.setChunkIndex(
-                chunkDraft.chunkIndex()
-        );
-
-        entity.setPageStart(
-                chunkDraft.pageStart()
-        );
-
-        entity.setPageEnd(
-                chunkDraft.pageEnd()
-        );
-
-        entity.setCreatedAt(
-                Instant.now()
-        );
+        DocumentChunkEntity entity = new DocumentChunkEntity();
+        entity.setChunkId(chunkDraft.chunkId().value());
+        entity.setDocumentId(request.documentId().value());
+        entity.setTenantId(request.tenantId().value());
+        entity.setProjectId(request.projectId() == null ? null : request.projectId().value());
+        entity.setTeamId(request.teamId() == null ? null : request.teamId().value());
+        entity.setText(chunkDraft.text());
+        entity.setContentHash(ContentHash.sha256(chunkDraft.text()).value());
+        entity.setChunkIndex(chunkDraft.chunkIndex());
+        entity.setPageStart(chunkDraft.pageStart());
+        entity.setPageEnd(chunkDraft.pageEnd());
+        entity.setCreatedAt(Instant.now());
 
         return entity;
     }
@@ -282,40 +191,16 @@ public class IngestionPipeline {
             IngestionPipelineRequest request
     ) {
         if (request == null) {
-            throw InvalidDocumentException.nullCommand(
-                    "IngestionPipelineRequest"
-            );
+            throw InvalidDocumentException.nullCommand("IngestionPipelineRequest");
         }
 
-        Objects.requireNonNull(
-                request.ingestionJobId(),
-                "ingestionJobId must not be null"
+        Objects.requireNonNull(request.ingestionJobId(), "ingestionJobId must not be null");
+        Objects.requireNonNull(request.documentId(), "documentId must not be null"
         );
-
-        Objects.requireNonNull(
-                request.documentId(),
-                "documentId must not be null"
-        );
-
-        Objects.requireNonNull(
-                request.tenantId(),
-                "tenantId must not be null"
-        );
-
-        Objects.requireNonNull(
-                request.objectKey(),
-                "objectKey must not be null"
-        );
-
-        Objects.requireNonNull(
-                request.fileName(),
-                "fileName must not be null"
-        );
-
-        Objects.requireNonNull(
-                request.mimeType(),
-                "mimeType must not be null"
-        );
+        Objects.requireNonNull(request.tenantId(), "tenantId must not be null");
+        Objects.requireNonNull(request.objectKey(), "objectKey must not be null");
+        Objects.requireNonNull(request.fileName(), "fileName must not be null");
+        Objects.requireNonNull(request.mimeType(), "mimeType must not be null");
     }
 
     public record IngestionPipelineRequest(

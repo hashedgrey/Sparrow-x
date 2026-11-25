@@ -11,9 +11,7 @@ import java.util.Objects;
 
 @Component
 public class ElasticsearchDocumentChunkIndexer {
-
     private final ElasticsearchChunkIndexer elasticsearchChunkIndexer;
-
     public ElasticsearchDocumentChunkIndexer(
             ElasticsearchChunkIndexer elasticsearchChunkIndexer
     ) {
@@ -22,16 +20,10 @@ public class ElasticsearchDocumentChunkIndexer {
 
     public int index(DocumentChunkIndexRequest request) {
         validate(request);
-
         try {
             List<DocumentChunkDraft> chunks = request.chunks();
-
-            if (chunks.isEmpty()) {
-                return 0;
-            }
-
+            if (chunks.isEmpty()) {return 0;}
             int indexed = 0;
-
             for (DocumentChunkDraft chunk : chunks) {
                 elasticsearchChunkIndexer.indexChunk(
                         request.tenantId(),
@@ -45,7 +37,6 @@ public class ElasticsearchDocumentChunkIndexer {
                         chunk.pageEnd(),
                         chunk.metadata()
                 );
-
                 indexed++;
             }
 
