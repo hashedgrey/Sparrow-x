@@ -45,8 +45,9 @@ public final class RootNameGrounding {
     /**
      * Return canonical labels that are explicitly mentioned in the immutable
      * original task AND overlap a proposed root expression. For a UNIQUE task,
-     * a single explicitly mentioned canonical name can repair an entirely bad
-     * proposed literal. Multiple independent names are never collapsed.
+     * a canonical name must overlap the proposed literal as well as the
+     * original task. A merely mentioned source/service cannot substitute for
+     * an unrelated root. Multiple independent names are never collapsed.
      */
     public static List<String> recoveryCandidates(String originalTask, String proposedLiteral,
                                                    Collection<String> knownLabels,
@@ -54,7 +55,9 @@ public final class RootNameGrounding {
         List<String> original = maximalMentions(originalTask, knownLabels);
         List<String> overlapping = maximalMentions(proposedLiteral, knownLabels);
         List<String> anchored = overlapping.stream().filter(original::contains).toList();
-        if (anchored.isEmpty() && uniqueMode && original.size() == 1) return original;
+        // The old unique-mode fallback accepted any single canonical label
+        // anywhere in the request, including a source-only instruction.
+        // Ground the recovery to the proposed entity expression instead.
         return anchored;
     }
 

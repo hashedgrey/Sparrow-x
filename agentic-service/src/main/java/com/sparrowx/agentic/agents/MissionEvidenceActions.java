@@ -35,6 +35,7 @@ import com.sparrowx.document.proto.EvidenceGoalProto;
 import com.sparrowx.document.proto.RetrievalModeProto;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -51,7 +52,7 @@ import java.util.Set;
  * MissionIntent is resolved before this process starts.
  * This agent never reclassifies the mission intent.
  */
-@org.springframework.stereotype.Component
+@Component
 public final class MissionEvidenceActions {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MissionEvidenceActions.class);
@@ -371,21 +372,10 @@ public final class MissionEvidenceActions {
                                 + ":type-recovery:" + i, refs, warnings);
             }
 
-            // TYPE_SCAN is authorized to answer genuinely exhaustive questions,
-            // not to replace a failed lookup of an explicitly named entity.
-            // When labels in its candidate set are literally named by the user,
-            // fail closed instead of silently broadening to all graph nodes.
-            if ((plan.mode() == Mode.TYPE_SCAN || plan.mode() == Mode.MULTI_TYPE_SCAN)
-                    && rootResult.outcome() == Outcome.RESOLVED) {
-                List<String> named = RootNameGrounding.maximalMentions(
-                        input.request().query(), result.candidates().stream()
-                                .map(Candidate::label).toList());
-                if (!named.isEmpty()) {
-                    rootResult = new RootResult(rootQuery, List.of(), Outcome.INCOMPLETE,
-                            "TYPE_SCAN may broaden explicitly named roots " + named
-                                    + "; confirm starting scope before graph execution");
-                }
-            }
+            // The resolver already certifies root cardinality and named-scope
+            // promotions. Do not reclassify a complete TYPE_SCAN merely because
+            // the user also mentioned an entity as a tool/source restriction;
+            // lexical overlap cannot establish the entity's semantic role.
             verifiedQueries.set(i, rootResult.query());
             rootResults.add(rootResult);
             if (rootResult.outcome() != Outcome.RESOLVED

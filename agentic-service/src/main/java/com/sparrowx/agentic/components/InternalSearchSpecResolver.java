@@ -5,6 +5,8 @@ import com.sparrowx.agentic.decision.SemanticDecisionService;
 import com.sparrowx.agentic.mission.model.MissionContext;
 import com.sparrowx.agentic.planning.InternalRootSelection.*;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceAnswer;
+import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionAnswer;
+import com.sparrowx.agentic.systemone.SystemOneDecisionClient.DecisionQuestion;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.ChoiceQuestion;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.NoulAnswer;
 import com.sparrowx.agentic.systemone.SystemOneDecisionClient.NoulQuestion;
@@ -98,27 +100,48 @@ public final class InternalSearchSpecResolver {
         Optional<String> chosenMode = tryChoose(request, state, "selectionMode", modeQuestion);
         List<String> extractedOnAbstention = chosenMode.isEmpty()
                 ? extractLiteralCandidates(request, state, false) : List.of();
-        if (chosenMode.isEmpty() && extractedOnAbstention.isEmpty())
-            throw new IllegalStateException("JEV root mode unresolved and no grounded root literal was extracted");
+        // An empty literal array is expected for legitimate broad requests.
+        // It does NOT, by itself, authorize a tenant-wide scan. When the
+        // five-way JEV mode choice abstains, ask a narrower bounded question
+        // about unnamed exhaustive scope; retain the same confidence gate.
+        Optional<Mode> confirmedScanMode = chosenMode.isEmpty() && extractedOnAbstention.isEmpty()
+                ? confirmUnnamedScanMode(request, state) : Optional.empty();
+        if (chosenMode.isEmpty() && extractedOnAbstention.isEmpty() && confirmedScanMode.isEmpty())
+            throw new IllegalStateException(
+                    "JEV root mode unresolved: no named root and no confidence-gated exhaustive scan confirmation");
         Mode mode = chosenMode.isPresent() ? Mode.valueOf(chosenMode.get())
-                : extractedOnAbstention.size() == 1 ? Mode.UNIQUE : Mode.EXPLICIT_SET;
+                : confirmedScanMode.orElseGet(() ->
+                        extractedOnAbstention.size() == 1 ? Mode.UNIQUE : Mode.EXPLICIT_SET);
         if (chosenMode.isEmpty())
-            LOG.info("internal.root-mode.recovered missionId={} via=literal-extraction mode={} literals={}",
-                    request.missionId(), mode, extractedOnAbstention.size());
+            LOG.info("internal.root-mode.recovered missionId={} via={} mode={} literals={}",
+                    request.missionId(), confirmedScanMode.isPresent()
+                            ? "jev-confirmed-unnamed-scan" : "literal-extraction",
+                    mode, extractedOnAbstention.size());
         // JEV can correctly identify an exhaustive answer type while overlooking
         // a separately NAMED entity that restricts that answer set. Before any
         // scan is authorized as the root scope, extract candidate *literal*
         // qualifiers. This does not authorize an entity: IntSvc must verify it.
-        boolean qualifierAudited = request.relationshipTraversalRequired()
+        boolean qualifierAudited = confirmedScanMode.isEmpty()
+                && request.relationshipTraversalRequired()
                 && (mode == Mode.TYPE_SCAN || mode == Mode.MULTI_TYPE_SCAN);
         List<String> namedQualifiers = !extractedOnAbstention.isEmpty()
                 ? extractedOnAbstention
                 : qualifierAudited ? extractLiteralCandidates(request, state, true) : List.of();
-        boolean namedQualifierPromotion = !namedQualifiers.isEmpty();
+        // Literal extraction is NOT authority to narrow an exhaustive scan.
+        // Distinguish an actual named starting-root constraint from a project,
+        // data-source, output-field or contextual mention with an independent
+        // confidence-gated bounded decision. An independently confirmed UNNAMED
+        // scan following an empty starting-root extraction already settles that
+        // question; auditing arbitrary contextual mentions again would let a
+        // second, lower-authority decision veto the certified scan.
+        List<String> confirmedRootQualifiers = qualifierAudited
+                ? confirmStartingRootQualifiers(request, state, mode, namedQualifiers)
+                : namedQualifiers;
+        boolean namedQualifierPromotion = !confirmedRootQualifiers.isEmpty();
         if (namedQualifierPromotion) {
-            mode = namedQualifiers.size() == 1 ? Mode.UNIQUE : Mode.EXPLICIT_SET;
-            LOG.info("internal.named-qualifier.candidate missionId={} count={} mode={}",
-                    request.missionId(), namedQualifiers.size(), mode);
+            mode = confirmedRootQualifiers.size() == 1 ? Mode.UNIQUE : Mode.EXPLICIT_SET;
+            LOG.info("internal.named-qualifier.certified missionId={} count={} mode={}",
+                    request.missionId(), confirmedRootQualifiers.size(), mode);
         }
 
         List<RootQuery> roots;
@@ -145,7 +168,7 @@ public final class InternalSearchSpecResolver {
                                     "CONTAINS", "Specified substring of a name/label",
                                     "RELEVANT", "Approximate or semantic similarity"))));
             RootLiteralResult literals = namedQualifierPromotion
-                    ? new RootLiteralResult(namedQualifiers, 1)
+                    ? new RootLiteralResult(confirmedRootQualifiers, 1)
                     : generateLiterals(request, state, mode, operator);
             List<String> names = literals.queries();
             // Type selection must see the extracted starting name; otherwise
@@ -174,15 +197,22 @@ public final class InternalSearchSpecResolver {
         Plan plan = parsePlan(output, types, request.query()).plan();
 
         Map<String, Object> debug = new LinkedHashMap<>();
-        debug.put("parameterRoute", chosenMode.isEmpty() ? "jev-abstained+llm-grounded-literal+jev-type"
+        debug.put("parameterRoute", confirmedScanMode.isPresent()
+                ? "jev-abstained+llm-no-literals+jev-confirmed-scan+jev-type"
+                : chosenMode.isEmpty() ? "jev-abstained+llm-grounded-literal+jev-type"
                 : namedQualifierPromotion ? "jev-mode+llm-qualifier-audit+jev-type"
                 : generated ? "jev-control-llm-literal-generation"
                 : qualifierAudited ? "jev-scan+llm-qualifier-audit" : "jev-only-scan");
-        debug.put("jevModeCertified", chosenMode.isPresent());
+        debug.put("jevModeCertified", chosenMode.isPresent() || confirmedScanMode.isPresent());
+        debug.put("jevScanModeRecovery", confirmedScanMode.map(Enum::name).orElse("NONE"));
         debug.put("rootSelectionMode", plan.mode().name());
         debug.put("rootQueryCount", plan.queries().size());
-        debug.put("namedQualifierAudit", namedQualifierPromotion ? "PROMOTED_TO_EXACT_SEARCH"
-                : qualifierAudited ? "NO_QUALIFIER_SELECTED" : "NOT_APPLICABLE");
+        debug.put("namedQualifierAudit", confirmedScanMode.isPresent()
+                ? "SKIPPED_AFTER_CERTIFIED_UNNAMED_SCAN"
+                : namedQualifierPromotion ? "JEV_CONFIRMED_NAMED_SCOPE"
+                : qualifierAudited ? "NO_CERTIFIED_NAMED_SCOPE" : "NOT_APPLICABLE");
+        debug.put("candidateQualifierCount", namedQualifiers.size());
+        debug.put("certifiedQualifierCount", confirmedRootQualifiers.size());
         debug.put("rootPlanGenerationAttempts", generationCalls);
         debug.put("ontologyVersion", ontology.schemaVersion());
         debug.put("parameterElapsedMs", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
@@ -190,6 +220,51 @@ public final class InternalSearchSpecResolver {
                 request.missionId(), plan.mode(), plan.queries().size(), generated,
                 debug.get("parameterElapsedMs"));
         return new Resolution(plan, Map.copyOf(debug));
+    }
+
+    /**
+     * A generative model may identify literal mentions but cannot change the
+     * independently selected root cardinality. Confirm each potential scope
+     * change with a bounded JEV decision. Do not infer source restrictions,
+     * product names, or output labels from text patterns or tenant-specific lists.
+     * Any unresolved vote stops the operation instead of silently shrinking the
+     * root set or returning a potentially overbroad answer.
+     */
+    private List<String> confirmStartingRootQualifiers(Request request,
+                                                       Map<String, Object> state,
+                                                       Mode originalMode,
+                                                       List<String> candidates) {
+        List<String> certified = new ArrayList<>();
+        for (int i = 0; i < candidates.size(); i++) {
+            String literal = candidates.get(i);
+            Map<String, Object> scopeState = new LinkedHashMap<>(state);
+            scopeState.put("candidateNamedRoot", literal);
+            scopeState.put("previouslyCertifiedScanMode", originalMode.name());
+            String field = "restrictsStartingRoots";
+            var response = semantic.tryBounded(Map.copyOf(scopeState),
+                    Map.of(field, new NoulQuestion(
+                            "Does the candidateNamedRoot identify an explicitly named "
+                            + "starting entity (or independently named set) that the "
+                            + "user requires as the actual starting ROOT SCOPE, such "
+                            + "that replacing the previously certified exhaustive "
+                            + "type scan with a named lookup would still cover ALL "
+                            + "requested starting entities? Answer NO when the "
+                            + "mention describes a data source, tool/service to use, "
+                            + "project/organization context, answer column or an "
+                            + "entity to be traversed only AFTER the roots are found. "
+                            + "Do not confuse a qualifier of every result with a "
+                            + "named starting entity. Abstain if uncertain.",
+                            "The named entity is an explicit exhaustive starting-root constraint",
+                            "The named mention does not replace the exhaustive starting root set")),
+                    jevMinimumConfidence,
+                    request.requestId() + ":root-scope-certification:" + i);
+            if (response.isEmpty() || !(response.get().answers().get(field) instanceof NoulAnswer vote)) {
+                throw new IllegalStateException(
+                        "JEV could not certify whether the named mention restricts starting roots");
+            }
+            if (vote.probability() > 0.5d) certified.add(literal);
+        }
+        return List.copyOf(certified);
     }
 
     /**
@@ -245,6 +320,55 @@ public final class InternalSearchSpecResolver {
         return List.copyOf(qualifiers);
     }
 
+    /**
+     * Recover only the *scope* of an unnamed exhaustive root set. A failed
+     * five-way choice is not treated as TYPE_SCAN automatically: both the
+     * original empty-literal audit and a new confident bounded JEV decision
+     * are required. LLM extraction never selects a mode or ontology type.
+     */
+    private Optional<Mode> confirmUnnamedScanMode(Request request, Map<String, Object> state) {
+        Map<String, Object> scoped = new LinkedHashMap<>(state);
+        scoped.put("namedStartingRootLiterals", List.of());
+        scoped.put("initialSelectionMode", "UNRESOLVED");
+        ChoiceQuestion focused = new ChoiceQuestion(
+                "The starting entity literal audit found no independently named roots. "
+                + "Does the ORIGINAL mission require enumerating a complete ontology-defined "
+                + "starting root set? Select TYPE_SCAN if there is ONE starting node type, "
+                + "MULTI_TYPE_SCAN if there are MULTIPLE independent starting node types, "
+                + "or NO_SCAN when the task is not explicitly exhaustive or scope is unclear. "
+                + "Do not classify output fields, job roles, services merely traversed later, "
+                + "or grouping targets as independently selected starting roots.",
+                Map.of("TYPE_SCAN", "Enumerate all starting entities of a single node type",
+                       "MULTI_TYPE_SCAN", "Enumerate independent starting sets across node types",
+                       "NO_SCAN", "No confidently authorized exhaustive starting scope"));
+        Optional<String> classified = tryChoose(request, scoped, "focusedScanMode", focused);
+        if (classified.isPresent()) {
+            return switch (classified.get()) {
+                case "TYPE_SCAN" -> Optional.of(Mode.TYPE_SCAN);
+                case "MULTI_TYPE_SCAN" -> Optional.of(Mode.MULTI_TYPE_SCAN);
+                default -> Optional.empty();
+            };
+        }
+
+        // For one-type questions, a binary bounded confirmation is often
+        // more discriminative than a multi-class answer. This remains a new
+        // confidence-gated JEV vote, never a silent low-confidence promotion.
+        var binary = semantic.tryBounded(Map.copyOf(scoped), Map.of("singleTypeScan", new NoulQuestion(
+                "Does the original mission explicitly require exhaustive enumeration of "
+                + "starting entities of exactly ONE ontology-defined type, with no "
+                + "independently named starting root? Answer NO if multiple starting "
+                + "types are needed, if the request is not exhaustive, or if uncertain.",
+                "Explicit unnamed exhaustive scan of exactly one root type",
+                "Named, non-exhaustive, multi-type, or uncertain scope")),
+                jevMinimumConfidence, request.requestId() + ":singleTypeScan");
+        if (binary.isEmpty()) return Optional.empty();
+        if (binary.get().answers().get("singleTypeScan") instanceof NoulAnswer vote
+                && vote.probability() >= jevMinimumConfidence) {
+            return Optional.of(Mode.TYPE_SCAN);
+        }
+        return Optional.empty();
+    }
+
     /** Only ontology-declared types are eligible for backend recovery scans. */
     public List<String> declaredTypes(MissionContext context) {
         return ontologyProvider.describe(Objects.requireNonNull(context, "context"))
@@ -285,13 +409,72 @@ public final class InternalSearchSpecResolver {
         scoped.put("rootSelectionStep", operation);
         Map<String, String> options = new LinkedHashMap<>();
         for (String type : types) options.put(type, "Tenant-ontology node type " + type);
-        String result = choose(request, scoped, "rootType",
-                new ChoiceQuestion("Select the ONTOLOGY TYPE of the STARTING root "
-                        + (literal == null ? "requested in the mission" : "'" + literal + "'")
-                        + ". Never choose an intermediate entity solely because "
-                        + "it appears in the requested OUTPUT.", options));
-        if (!types.contains(result)) throw new IllegalStateException("JEV chose unregistered root type");
-        return result;
+        Optional<String> chosen = tryChoose(request, scoped, "rootType",
+                new ChoiceQuestion("Which ontology type identifies the STARTING entities that "
+                        + "must be independently discovered or enumerated for the mission? "
+                        + "Use the scope of 'each/all' and the starting entity "
+                        + (literal == null ? "set" : "'" + literal + "'")
+                        + ", not the role filter, projected answer entities, "
+                        + "or types that are only reached through graph relationships.", options));
+        if (chosen.isPresent()) {
+            String result = chosen.get();
+            if (!types.contains(result))
+                throw new IllegalStateException("JEV chose unregistered root type");
+            return result;
+        }
+        // The multi-class vote abstained. Retry as independent bounded yes/no
+        // questions, not by accepting the rejected ranking or asking an LLM
+        // to invent the type. Each ontology candidate must receive a confident
+        // answer and exactly one may be positive: an unresolved competitor
+        // makes the root identity ambiguous and therefore inadmissible.
+        return confirmRootTypeByIndependentVotes(request, scoped, types, literal);
+    }
+
+    private String confirmRootTypeByIndependentVotes(Request request,
+                                                     Map<String, Object> scoped,
+                                                     List<String> types, String literal) {
+        if (types.isEmpty() || types.size() > 24)
+            throw new IllegalStateException("JEV rootType unresolved: unsupported ontology type count");
+        Map<String, DecisionQuestion> questions = new LinkedHashMap<>();
+        for (int i = 0; i < types.size(); i++) {
+            String type = types.get(i);
+            questions.put("startingRootType" + i, new NoulQuestion(
+                    "For the originalMission, is ontology node type '" + type + "' the "
+                    + "INDEPENDENTLY SELECTED starting entity set to discover/scan "
+                    + (literal == null ? "" : "for the explicitly named root '" + literal + "' ")
+                    + "BEFORE relationship traversals? Evaluate which kind of entity "
+                    + "the mission quantifies over (e.g. 'each/all ...'). "
+                    + "Answer NO if this type is only a requested output, a role "
+                    + "filter, a relationship target, or an intermediate entity. "
+                    + "Do not guess when the starting type is unclear.",
+                    "This type is the independently selected starting root type",
+                    "This type is not the independently selected starting root type"));
+        }
+        Map<String, DecisionAnswer> answers = semantic.tryIndependentBounded(
+                Map.copyOf(scoped), questions, jevMinimumConfidence,
+                request.requestId() + ":rootType-independent-confirmation");
+        if (answers.size() != questions.size())
+            throw new IllegalStateException(
+                    "JEV rootType unresolved: independent type confirmations abstained");
+        String selected = null;
+        for (int i = 0; i < types.size(); i++) {
+            DecisionAnswer answer = answers.get("startingRootType" + i);
+            if (!(answer instanceof NoulAnswer vote))
+                throw new IllegalStateException("JEV rootType unresolved: missing bounded type vote");
+            // tryIndependentBounded has already verified each vote's confidence.
+            if (vote.probability() > 0.5d) {
+                if (selected != null)
+                    throw new IllegalStateException(
+                            "JEV rootType ambiguous: multiple independent types confirmed");
+                selected = types.get(i);
+            }
+        }
+        if (selected == null)
+            throw new IllegalStateException(
+                    "JEV rootType unresolved: no independent starting type confirmed");
+        LOG.info("internal.root-type.recovered missionId={} mode=independent-jev-votes type={} candidates={}",
+                request.missionId(), selected, types.size());
+        return selected;
     }
 
     private List<String> selectScanTypes(Request request, Map<String, Object> state, List<String> types) {
