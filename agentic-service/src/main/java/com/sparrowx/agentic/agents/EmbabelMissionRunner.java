@@ -8,11 +8,10 @@ import com.embabel.agent.core.AgentProcessStatusCode;
 import com.embabel.agent.core.ProcessOptions;
 import com.sparrowx.agentic.mission.model.MissionResult;
 import com.sparrowx.agentic.planning.PlannerMode;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Focused programmatic entrypoint into the Embabel platform.
@@ -20,8 +19,8 @@ import org.slf4j.LoggerFactory;
  * Planner choice is frozen in MissionIntent before this process begins.
  * ProcessOptions is authoritative for this invocation.
  */
+@Slf4j
 public final class EmbabelMissionRunner {
-    private static final Logger LOG = LoggerFactory.getLogger(EmbabelMissionRunner.class);
     private final AgentPlatform agentPlatform;
     public EmbabelMissionRunner(
             AgentPlatform agentPlatform
@@ -35,7 +34,7 @@ public final class EmbabelMissionRunner {
         Objects.requireNonNull(input, "input must not be null");
 
         PlannerType plannerType = plannerType(input.intent().plannerMode());
-        LOG.info("mission.planner.requested missionId={} mode={} embabelPlanner={}",
+        log.info("mission.planner.requested missionId={} mode={} embabelPlanner={}",
                 input.missionId(), input.intent().plannerMode(), plannerType);
 
         // Work with the process status before extracting its typed result. The
@@ -78,7 +77,7 @@ public final class EmbabelMissionRunner {
             throw new IllegalStateException("Embabel returned a result for another mission");
         }
 
-        LOG.info("mission.planner.completed missionId={} requested={} status={}",
+        log.info("mission.planner.completed missionId={} requested={} status={}",
                 input.missionId(), plannerType, process.getStatus());
         return result;
     }
