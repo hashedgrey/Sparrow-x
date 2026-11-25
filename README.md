@@ -98,31 +98,44 @@ flowchart TD
     A[Submit mission] --> B[System 1: Classify intent and requirements]
     B --> C[Persist mission and checkpoints]
     C --> D[Temporal workflow]
-    D --> E[Embabel: Register goal]
+    D --> E[Embabel: Register goal or resume mission]
     E --> F[System 1: Review goal and evidence]
     F --> G{Goal status}
 
-    G -->|Needs evidence| H[Java: Check authorization, prerequisites and budgets]
-    H --> I[System 1: Estimate eligible action values]
-    I --> J[Prepare candidate proposals and queries]
-    J -.->|If needed| K[Generative LLM: Refine subquery]
-    K -.-> J
-    J --> L{Configured planner}
-    L -->|GOAP| M[Search modeled goal-directed paths]
-    L -->|HYBRID| N[Rank achievable actions by net utility]
-    M --> S[Execute selected authorized capability]
-    N --> S
-    S --> T[Admit evidence and update blackboard]
-    T --> F
+    G -->|Needs evidence| H[Java: Enforce eligibility and constraints]
+    H --> I[System 1: Score eligible capabilities]
 
-    G -->|Satisfied or ready| O[Grounded synthesis and validation]
-    G -->|Blocked or ambiguous| P[Unresolved outcome]
+    I --> J{Planner mode}
+    J -->|GOAP| K[Goal-directed path search]
+    J -->|HYBRID| L[Net utility-based selection]
 
-    O --> Q[Persist and stream result]
+    K --> M[Embabel: Selected action]
+    L --> M
+
+    M --> N{New subquery needed?}
+    N -->|Yes| O[Escalate To Generative LLM: Construct subquery]
+    N -->|No| P[Use original query]
+
+    O --> Q[Execute authorized capability]
     P --> Q
 
-    D -.->|Approval required| R[Human review gate]
-    R -.-> D
+    Q --> R[Admit evidence and update blackboard]
+    R --> F
+
+    G -->|Satisfied or ready| S[Grounded synthesis and validation]
+    G -->|Blocked or ambiguous| X[Unresolved outcome]
+
+    S --> Y[Persist and stream result]
+    X --> Y
+
+    F -.->|Approval required| U[Return APPROVAL_REQUIRED]
+    M -.->|Approval required| U
+    S -.->|Approval required| U
+
+    U --> V[Temporal: HITL approval gate]
+    V -->|Approved| W[Resume from authorized execution point]
+    W --> E
+    V -->|Rejected or expired| X
 ```
 
 The execution loop continues until the goal is satisfied, evidence is exhausted or execution constraints prevent further progress. Semantic judgments inform execution, but modeled planning rules and deterministic governance remain independent of model predictions. A terminal outcome does not by itself establish that every requested fact was verified; unresolved gaps remain explicit.
