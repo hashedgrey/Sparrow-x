@@ -68,9 +68,15 @@ public final class GraphEvidenceGoalResolver {
             Select joins using edgeId values from schemaEdges ONLY. Each join
             gives a source node variable, a target node variable, an edgeId,
             and a fresh relationshipVariable (e.g. membershipEdge).
-            The first bound variable is 'root'. A join's source must be bound
-            by an earlier join. Its target can be new or an existing variable
-            of the indicated node type (for cycles/converging branches).
+            The first bound variable is 'root', whose node type is rootType.
+            Each schemaEdges edgeId has an EXACT fromType and toType: its
+            source variable MUST already be bound to that fromType. To traverse
+            a relationship in the opposite direction choose the schemaEdges
+            inverse edgeId with the matching fromType; do not reuse the forward
+            edgeId with swapped variables. Its target can be new or an existing
+            variable of the indicated node type (for cycles/converging branches).
+            Joins are checked and dependency-ordered against the ontology before
+            execution. Never add or omit a join merely to satisfy validation.
 
             A relationshipVariable may be used in outputs/filters/comparisons
             ONLY with properties listed for that edge in schemaEdges.fields.
@@ -191,6 +197,8 @@ public final class GraphEvidenceGoalResolver {
         Map<String, Object> sharedInput = new LinkedHashMap<>();
         sharedInput.put("query", query);
         sharedInput.put("rootType", rootType);
+        sharedInput.put("rootStartingEdges", edgeDescriptions.stream()
+                .filter(edge -> rootType.equals(edge.get("fromType"))).toList());
         sharedInput.put("selectedRootCount", roots.entityIds().size());
         sharedInput.put("schemaEdges", edgeDescriptions);
         sharedInput.put("fieldsByType", ontology.fields());
@@ -215,7 +223,10 @@ public final class GraphEvidenceGoalResolver {
             if (bindingError != null) {
                 input.put("previousInvalidSelection", previous);
                 input.put("bindingError", bindingError);
-                input.put("repairInstruction", "Correct the selection using declared node fields, relationship fields and schema edges; never remove required semantics.");
+                input.put("repairInstruction", "The join rejection identifies a schema-bound source/type mismatch or unbound dependency. "
+                        + "Rebuild joins from rootType via schemaEdges: source variable's bound type must equal edge.fromType. "
+                        + "For an inverse traversal use the inverse edgeId whose fromType matches that source. "
+                        + "Preserve all required predicates, negated joins and outputs; never remove required semantics.");
             }
             String attemptId = operationId + ":select:" + attempt;
             final LlmDecisionEngine.Result response = semantic.escalate(
@@ -278,10 +289,10 @@ public final class GraphEvidenceGoalResolver {
         Map<String, Set<String>> relationshipFieldsByVariable = new LinkedHashMap<>();
         List<GraphQueryRequest.Traverse> traversals = new ArrayList<>();
         Set<String> usedJoinTargets = new HashSet<>();
-        for (Object entry : checkedList(selection.get("joins"))) {
+        for (Map<String, ?> item : orderJoinsByBindings(rootType, edges,
+                checkedList(selection.get("joins")))) {
             if (traversals.size() >= maxJoins)
                 throw new IllegalArgumentException("Graph goal exceeds configured join budget");
-            Map<String, ?> item = checkedMap(entry);
             String source = variable(item.get("source"));
             String target = variable(item.get("target"));
             String id = nonblank(item.get("edgeId"));
@@ -377,6 +388,67 @@ public final class GraphEvidenceGoalResolver {
         return new GraphQueryRequest(rootType, roots.entityIds(), traversals,
                 predicates, projections, maxQueryRows, true, ontology.schemaVersion(),
                 fieldComparisons, negated, rowSelection);
+    }
+
+    /**
+     * Canonicalize join ordering, never join identity. The LLM may provide a
+     * valid set of typed joins in non-topological order; graph execution requires
+     * each source to be bound first. Unknown edges, incorrect direction, type
+     * conflicts and disconnected subgraphs remain invalid and go to the normal
+     * schema-bound repair path. No entity/relationship names are special-cased.
+     */
+    private static List<Map<String, ?>> orderJoinsByBindings(
+            String rootType, Map<String, EdgeOption> edges, List<?> rawJoins) {
+        List<Map<String, ?>> pending = new ArrayList<>();
+        for (Object item : rawJoins) pending.add(checkedMap(item));
+        Map<String, String> boundTypes = new LinkedHashMap<>();
+        boundTypes.put("root", rootType);
+        List<Map<String, ?>> ordered = new ArrayList<>();
+        while (!pending.isEmpty()) {
+            boolean progressed = false;
+            for (int i = 0; i < pending.size(); i++) {
+                Map<String, ?> join = pending.get(i);
+                String source = variable(join.get("source"));
+                String target = variable(join.get("target"));
+                String edgeId = nonblank(join.get("edgeId"));
+                EdgeOption edge = edges.get(edgeId);
+                if (edge == null) throw new IllegalArgumentException("Unknown tenant schema edge ID: " + edgeId);
+                String knownSource = boundTypes.get(source);
+                if (knownSource == null || !edge.fromType().equals(knownSource)) continue;
+                String knownTarget = boundTypes.get(target);
+                if (knownTarget != null && !edge.toType().equals(knownTarget)) continue;
+                boundTypes.putIfAbsent(target, edge.toType());
+                ordered.add(join);
+                pending.remove(i);
+                progressed = true;
+                break;
+            }
+            if (!progressed) {
+                Map<String, ?> join = pending.getFirst();
+                String source = variable(join.get("source"));
+                String edgeId = nonblank(join.get("edgeId"));
+                EdgeOption edge = edges.get(edgeId);
+                String sourceType = boundTypes.get(source);
+                if (sourceType == null)
+                    throw new IllegalArgumentException("Join source '" + source
+                            + "' is unbound; introduce it via a connected ontology join from 'root'");
+                if (edge != null && !edge.fromType().equals(sourceType)) {
+                    String allowed = edges.values().stream()
+                            .filter(option -> sourceType.equals(option.fromType()))
+                            .sorted(Comparator.comparing(EdgeOption::id))
+                            .limit(12)
+                            .map(option -> option.id() + " (" + option.relation() + " -> "
+                                    + option.toType() + ")")
+                            .collect(java.util.stream.Collectors.joining(", "));
+                    throw new IllegalArgumentException("Join source '" + source + "' has type '"
+                            + sourceType + "' but edge " + edgeId + " expects '"
+                            + edge.fromType() + "'. Schema edges starting at that source type: " + allowed);
+                }
+                throw new IllegalArgumentException("Incompatible join target or cyclic binding for "
+                        + source + " using " + edgeId);
+            }
+        }
+        return List.copyOf(ordered);
     }
 
     private static void requireField(String variable, String field, Map<String, String> nodeTypes,
